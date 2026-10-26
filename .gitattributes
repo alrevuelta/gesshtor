@@ -1,0 +1,4 @@
+# Los mismos ficheros en todos los sistemas (en Windows, sin cambiar los finales de línea).
+* text=auto eol=lf
+*.pdf binary
+*.p12 binary

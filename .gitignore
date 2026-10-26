@@ -1,0 +1,16 @@
+/target
+/mock
+*.p12
+*.pfx
+!/pruebas/prueba.p12
+cache.json
+.panel.lock
+.DS_Store
+# Datos de verdad: nunca al repositorio (los de prueba, inventados, están en pruebas/).
+/pruebas/renta_*
+/borrar/
+datos.json
+!/pruebas/*/datos.json
+justificantes/
+copias/
+documentos/

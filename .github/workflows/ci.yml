@@ -1,0 +1,81 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  binario:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { nombre: linux-x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, pruebas: true }
+          - { nombre: macos-arm64, os: macos-latest, target: aarch64-apple-darwin, pruebas: true }
+          - { nombre: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin, pruebas: false }
+          - { nombre: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, pruebas: true }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # El commit que dice `gesshtor --version`.
+      - run: echo "GESSHTOR_COMMIT=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+      # Mientras pruebas/ no esté en el repo, las pruebas no compilan: se saltan (con un aviso) y clippy mira solo
+      # la app. Cuando esté, vuelven solas.
+      - if: matrix.nombre == 'linux-x86_64'
+        run: |
+          if [ -d pruebas ]; then
+            cargo clippy --all-targets -- -D warnings
+          else
+            echo "::warning::Sin la carpeta pruebas/ en el repo: no se pasan las pruebas."
+            cargo clippy -- -D warnings
+          fi
+      - if: matrix.pruebas && hashFiles('pruebas/**') != ''
+        run: cargo test
+      - run: cargo build --profile dist --target ${{ matrix.target }}
+      - if: matrix.pruebas
+        run: target/${{ matrix.target }}/dist/gesshtor --version
+      # En un .tar.gz (Linux y Mac), para que siga siendo ejecutable al descargarlo; en Windows, un .zip.
+      - name: Empaquetar
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a "$GITHUB_WORKSPACE/dist/gesshtor-${{ matrix.nombre }}.zip" gesshtor.exe
+          else
+            tar -czf "$GITHUB_WORKSPACE/dist/gesshtor-${{ matrix.nombre }}.tar.gz" gesshtor
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gesshtor-${{ matrix.nombre }}
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: binario
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # Para comprobar lo bajado (install.sh lo hace solo).
+      - run: cd dist && sha256sum * > SHA256SUMS
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
