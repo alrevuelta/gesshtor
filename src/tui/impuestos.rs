@@ -570,7 +570,7 @@ impl Pantalla for Impuestos {
             KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1),
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
+            KeyCode::PageDown | KeyCode::Char(' ') => self.scroll = self.scroll.saturating_add(10),
             KeyCode::Home => self.scroll = 0,
             KeyCode::Char('t') => {
                 self.todas = !self.todas;

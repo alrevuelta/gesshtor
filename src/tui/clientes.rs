@@ -226,6 +226,10 @@ impl Pantalla for Clientes {
         self.sel = self.sel.min(n.saturating_sub(1));
     }
 
+    fn usa_anio(&self) -> bool {
+        false
+    }
+
     fn capturando(&self) -> bool {
         self.form.is_some() || self.confirmar.is_some() || self.buscando
     }

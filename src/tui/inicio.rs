@@ -204,6 +204,10 @@ impl Pantalla for Inicio {
         false
     }
 
+    fn usa_anio(&self) -> bool {
+        false
+    }
+
     fn atajos(&self) -> Vec<(&'static str, &'static str)> {
         vec![("S", "traer lo último"), ("Tab", "más")]
     }

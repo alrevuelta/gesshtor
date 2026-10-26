@@ -603,7 +603,7 @@ impl Pantalla for Declaraciones {
                 KeyCode::Up => x.mover(-1, n),
                 KeyCode::Down => x.mover(1, n),
                 KeyCode::PageUp => x.mover(-pagina, n),
-                KeyCode::PageDown => x.mover(pagina, n),
+                KeyCode::PageDown | KeyCode::Char(' ') => x.mover(pagina, n),
                 KeyCode::Home => x.desplaz = 0,
                 KeyCode::End => x.mover(isize::MAX / 2, n),
                 KeyCode::Char('o') => self.abrir(ctx),
@@ -652,6 +652,11 @@ impl Pantalla for Declaraciones {
 
     fn capturando(&self) -> bool {
         self.buscando
+    }
+
+    /// Con «todos los años», el de arriba no cuenta.
+    fn usa_anio(&self) -> bool {
+        !self.todos
     }
 
     fn al_entrar(&mut self, ctx: &mut Ctx) {

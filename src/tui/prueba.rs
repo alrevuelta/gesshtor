@@ -188,7 +188,7 @@ mod tests {
         let hoy = crate::dominio::fmt::anio_actual();
         let mut a = app();
         ir(&mut a, "Años");
-        assert!(pantalla(&mut a, 120, 36).contains("en curso"), "la fila del año en curso");
+        assert!(pantalla(&mut a, 120, 36).lines().any(|l| l.contains(&format!("{hoy}*")) && l.contains("en curso")), "la fila del año en curso");
         teclas(&mut a, "<enter>");
         assert_eq!((a.titulo_activa(), a.ctx.anio), ("Años", hoy), "Enter abre el año en curso");
         let p = pantalla(&mut a, 120, 36);
@@ -200,29 +200,45 @@ mod tests {
         assert!(pantalla(&mut a, 120, 36).contains(&format!("{hoy} · en curso")), "y vuelve");
     }
 
-    /// Espacio y una letra llevan a esa entrada del menú, estés donde estés; escribiendo, es un espacio.
+    /// Cada entrada del menú lleva su número al lado, y ese número va allí; escribiendo, es un número.
     #[test]
-    fn espacio_y_una_letra() {
+    fn un_numero_por_entrada() {
+        // Una autónoma sin nómina: Resumen (1–3) y Autónomo (4–8), sin Empleo.
         let mut a = app();
-        teclas(&mut a, "<space>f");
+        teclas(&mut a, "4");
         assert_eq!(a.titulo_activa(), "Facturas");
-        assert!(pantalla(&mut a, 120, 36).contains("Facturas      f"), "la letra, al lado");
-        teclas(&mut a, "<space>A");
-        assert_eq!(a.titulo_activa(), "Años");
-        teclas(&mut a, "<space><esc>t<space>x");
-        assert_eq!(a.titulo_activa(), "Años", "Esc o una letra sin entrada: nada");
-        // Sin nómina no hay Empleo: «s» no lleva a Sueldo.
-        teclas(&mut a, "<space>s");
-        assert_eq!(a.titulo_activa(), "Años");
-        // Con el menú arriba, las letras salen en una ventana.
-        teclas(&mut a, "<space>");
-        assert!(pantalla(&mut a, 80, 24).contains("Ir a…"));
-        teclas(&mut a, "t");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains(" › 4 Facturas") && p.contains("   7 Impuestos"), "{p}");
+        teclas(&mut a, "7");
         assert_eq!(a.titulo_activa(), "Impuestos");
-        // Buscando, el espacio se escribe.
-        teclas(&mut a, "<space>f/a<space>b");
+        teclas(&mut a, "9");
+        assert_eq!(a.titulo_activa(), "Impuestos", "no hay novena");
+        teclas(&mut a, "2");
+        assert_eq!(a.titulo_activa(), "Años");
+        // Con el menú arriba: cada sección con el número de su primera entrada, y sus pestañas con el suyo.
+        let p = pantalla(&mut a, 80, 24);
+        assert!(p.contains("4 Autónomo") && p.contains("2 Años"), "{p}");
+        // Buscando, los números se escriben.
+        teclas(&mut a, "4/1");
         assert_eq!(a.titulo_activa(), "Facturas");
         assert!(a.pantalla().capturando());
+        // Caben todas: con las tres secciones son 10 (1–9 y 0).
+        assert!(titulos(&a).len() <= 10, "{:?}", titulos(&a));
+    }
+
+    /// El año va arriba, en el centro (en grande si hay sitio), salvo en lo que no depende de él: allí `-` no hace nada.
+    #[test]
+    fn el_anio_arriba_salvo_en_inicio() {
+        let hoy = crate::dominio::fmt::anio_actual();
+        let mut a = app();
+        ir(&mut a, "Facturas");
+        assert!(pantalla(&mut a, 120, 24).lines().next().unwrap().trim_end().ends_with(&format!(" {hoy}")));
+        assert!(pantalla(&mut a, 120, 36).contains("▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀"), "en grande");
+        ir(&mut a, "Inicio");
+        assert!(!pantalla(&mut a, 120, 36).contains("▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀"));
+        assert!(!pantalla(&mut a, 120, 24).lines().next().unwrap().contains(&hoy.to_string()));
+        teclas(&mut a, "-");
+        assert_eq!(a.ctx.anio, hoy, "en Inicio, - no cambia el año");
     }
 
     /// Ver una pantalla: `PANTALLA=Sueldo TECLAS="<down>" W=120 H=36 DATOS=mock/ana cargo test ver_pantalla --
