@@ -659,7 +659,7 @@ impl Facturas {
         if lista.is_empty() {
             let txt = if self.filtro == Filtro::Todas && self.busca.valor.is_empty() {
                 if self.cerrado {
-                    format!(" No hay facturas de {} en la app. Es un año cerrado: se ve en Actividad, con tu Renta.", ctx.anio)
+                    format!(" No hay facturas de {} en la app. Es un año cerrado: se ve en Impuestos, con tu Renta.", ctx.anio)
                 } else {
                     format!(" Todavía no hay facturas en {}. Pulsa n para crear la primera.", ctx.anio)
                 }

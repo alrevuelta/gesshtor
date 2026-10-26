@@ -4,11 +4,11 @@
 //!   salió; sin ella, lo que te tocaría por tus nóminas apuntadas (`informe::empleo::retencion`).
 //! - Debajo, mes a mes: de tus nóminas apuntadas o, si no, de la Seguridad Social (≈, lo cotizado).
 //!
-//! Enter abre un mes (tu nómina y lo liquidado a la Seguridad Social, concepto a concepto); «c», el camino del
-//! dinero, de lo que pagó tu empresa a lo que te llegó; «n» apunta (o cambia) la nómina del mes.
+//! Enter abre un mes (tu nómina y lo liquidado a la Seguridad Social, concepto a concepto); «n» apunta (o cambia)
+//! la nómina del mes. De lo que pagó tu empresa a lo que te llegó, paso a paso, está en «Años», al abrir el año.
 use crate::dominio::fmt::DIF;
 use super::empleo_nominas::{formulario, guardar, mes, mes_nuevo};
-use super::{empleo_camino as ventana_camino, empleo_mes as ventana_mes};
+use super::empleo_mes as ventana_mes;
 use super::empleo::{col, col_der, con_importes, eur_duro, parrafo, pct1, pintar_filas, pintar_linea, tabla, Cache, Col, Fila, FilaT, Tabla, RESTO};
 use crate::dominio::fmt;
 use crate::dominio::fmt::nombre_mes;
@@ -44,7 +44,6 @@ enum Modo {
     Tabla,
     /// Un mes (índice en `meses`).
     Mes(usize, Ventana),
-    Camino(Ventana),
     /// El formulario de la nómina, con el id de la que se cambia (None: nueva).
     Form(Box<Formulario>, Option<String>),
 }
@@ -366,13 +365,6 @@ impl Pantalla for Sueldo {
                 let b = bloque(&t).title_bottom(Line::styled(" ← → otro mes · n nómina · Esc volver ", tema::apagado()).right_aligned());
                 ven.dibujar(f, area, b, generacion, |w| ventana_mes::lineas(&ctx.datos, m, w));
             }
-            Modo::Camino(ven) => {
-                let Some(c) = &self.camino else { return };
-                let t = format!("{} · {y}", ventana_camino::titulo(c));
-                let b = bloque(&t).title_bottom(Line::styled(" Esc volver ", tema::apagado()).right_aligned());
-                let a = &self.cache.anio;
-                ven.dibujar(f, area, b, generacion, |w| ventana_camino::lineas(c, a, w));
-            }
             Modo::Form(fm, _) => fm.dibujar_ventana(f, area, 72),
         }
     }
@@ -420,12 +412,6 @@ impl Pantalla for Sueldo {
                 }
                 return true;
             }
-            Modo::Camino(ven) => {
-                if !ven.tecla(k) && matches!(k.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace | KeyCode::Char('c')) {
-                    self.modo = Modo::Tabla;
-                }
-                return true;
-            }
             Modo::Tabla => {}
         }
         let hay = self.hay_meses();
@@ -440,10 +426,6 @@ impl Pantalla for Sueldo {
                 None => {}
             },
             KeyCode::Char('n') => self.apuntar(ctx, if hay { Some(self.sel) } else { None }),
-            KeyCode::Char('c') => match self.camino {
-                Some(_) => self.modo = Modo::Camino(Ventana::default()),
-                None => ctx.info(format!("Para ver de lo que pagó tu empresa a lo que te llegó hace falta tu Renta de {} o tus nóminas.", ctx.anio)),
-            },
             _ => return false,
         }
         true
@@ -453,12 +435,11 @@ impl Pantalla for Sueldo {
         match &self.modo {
             Modo::Form(..) => vec![("Tab ↓", "siguiente"), ("← →", "mes"), ("Ctrl+S", "guardar"), ("Esc", "cancelar")],
             Modo::Mes(..) => vec![("← →", "otro mes"), ("n", "nómina del mes"), ("↑↓", "desplazar"), ("Esc", "volver")],
-            Modo::Camino(..) => vec![("↑↓ PgUp PgDn", "desplazar"), ("Esc", "volver")],
-            Modo::Tabla if !self.hay_meses() => vec![("n", "apuntar nómina"), ("c", "de tu empresa a ti")],
+            Modo::Tabla if !self.hay_meses() => vec![("n", "apuntar nómina")],
             Modo::Tabla => {
                 let vacio = self.meses.get(self.sel).is_none_or(|m| m.vacio());
                 let n = if self.hay_nomina() { "cambiar nómina" } else { "apuntar nómina" };
-                vec![("↑↓", "mes"), ("Enter", if vacio { "apuntar nómina" } else { "ver el mes" }), ("n", n), ("c", "de tu empresa a ti")]
+                vec![("↑↓", "mes"), ("Enter", if vacio { "apuntar nómina" } else { "ver el mes" }), ("n", n)]
             }
         }
     }

@@ -71,18 +71,6 @@ pub(super) fn envolver(trozos: &[(String, Style)], w: usize, sangria: usize) -> 
     lineas
 }
 
-/// «Nombre             1.234,56 €» en `w` columnas: el nombre se corta con «…» si no cabe; el importe, nunca.
-pub(super) fn fila(nombre: &str, valor: &str, w: usize, st_nombre: Style, st_valor: Style) -> Line<'static> {
-    let nv = valor.chars().count();
-    let libre = w.saturating_sub(nv + 1);
-    let mut et: String = nombre.to_string();
-    if et.chars().count() > libre {
-        et = et.chars().take(libre.saturating_sub(1)).collect::<String>() + "…";
-    }
-    let hueco = w.saturating_sub(et.chars().count() + nv).max(1);
-    Line::from(vec![Span::styled(et, st_nombre), Span::raw(" ".repeat(hueco)), Span::styled(valor.to_string(), st_valor)])
-}
-
 /// Dos columnas de `w` de ancho, una al lado de la otra y separadas por 3 espacios, en las mismas líneas.
 pub fn dos_columnas(izq: Vec<Line<'static>>, der: Vec<Line<'static>>, w: usize) -> Vec<Line<'static>> {
     (0..izq.len().max(der.len()))
@@ -152,6 +140,18 @@ pub fn cuando(s: &str) -> String {
     }
 }
 
+/// Una ruta entera, con «~» en vez de tu carpeta personal: «~/Impuestos/ana».
+pub fn ruta_corta(p: &std::path::Path) -> String {
+    let entera = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let p = entera(p);
+    let casa = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|c| entera(std::path::Path::new(&c)));
+    match casa.as_deref().and_then(|c| p.strip_prefix(c).ok()) {
+        Some(resto) if !resto.as_os_str().is_empty() => format!("~{}{}", std::path::MAIN_SEPARATOR, resto.display()),
+        Some(_) => "~".into(),
+        None => p.display().to_string(),
+    }
+}
+
 /// Una cifra en corto, para barras, ejes y columnas estrechas: 1234,5 → «1,2k»; 850 → «850»; 24.190 → «24k»;
 /// 1.500.000 → «1,5M».
 pub fn compacto(x: f64) -> String {
@@ -176,6 +176,17 @@ pub fn compacto(x: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rutas_cortas() {
+        let Some(casa) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else { return };
+        let casa = std::path::absolute(std::path::Path::new(&casa)).unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(ruta_corta(&casa.join("Impuestos").join("ana")), format!("~{sep}Impuestos{sep}ana"));
+        assert_eq!(ruta_corta(&casa), "~");
+        // Una relativa, entera.
+        assert!(!ruta_corta(std::path::Path::new("datos")).starts_with("datos"));
+    }
 
     #[test]
     fn numeros_compactos() {
@@ -223,8 +234,5 @@ mod tests {
         let t: Vec<String> = envolver(&[("cuentan 1.234,56 € y 21 % más".into(), Style::new())], 16, 0).iter().map(|l| l.to_string()).collect();
         assert_eq!(t, ["cuentan", "1.234,56 € y", "21 % más"]);
         assert!(l.iter().all(|l| l.width() <= 12));
-        let f = fila("Un nombre muy largo que no cabe", "1.234,56 €", 20, Style::new(), Style::new());
-        assert_eq!(f.width(), 20);
-        assert!(f.to_string().ends_with("1.234,56 €") && f.to_string().contains('…'));
     }
 }

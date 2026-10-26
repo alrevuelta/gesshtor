@@ -273,21 +273,6 @@ impl Camino {
     pub fn irpf(&self) -> f64 {
         r2(self.irpf_sueldo + self.irpf_especie)
     }
-    /// La base de los porcentajes: lo que pagó tu empresa si se sabe; si no, tu bruto.
-    pub fn total(&self) -> f64 {
-        self.coste.unwrap_or(self.bruto)
-    }
-    /// `x` en % de `total()`.
-    pub fn pct(&self, x: f64) -> f64 {
-        let t = self.total();
-        if t.abs() > DIF { x / t * 100.0 } else { 0.0 }
-    }
-    /// De cada 100 € de `total()`: (impuestos y cotizaciones, en dinero, en especie), redondeados y sumando 100.
-    pub fn de_cada_100(&self) -> (i64, i64, i64) {
-        let dinero = self.pct(self.dinero).round() as i64;
-        let especie = self.pct(self.especie).round() as i64;
-        (100 - dinero - especie, dinero, especie)
-    }
     /// Lo retenido, en % del bruto.
     pub fn retenido_pct(&self) -> f64 {
         if self.bruto.abs() > DIF { self.irpf() / self.bruto * 100.0 } else { 0.0 }

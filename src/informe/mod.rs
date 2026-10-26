@@ -2,8 +2,9 @@
 pub mod anio;
 pub mod autonomo;
 pub mod empleo;
-pub mod este_anio;
 pub mod inicio;
+pub mod prevision;
+pub mod reparto;
 
 use crate::dominio::{renta::Renta, Datos, PRIMER_ANIO};
 use crate::dominio::fmt::anio_actual;

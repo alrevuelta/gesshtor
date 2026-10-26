@@ -147,8 +147,8 @@ pub fn recorrer(dir: &Path) -> BTreeMap<String, String> {
             }
             let mut extra: Vec<(&str, &str)> = pasos.to_vec();
             match *t {
-                "Sueldo" => extra.extend([("c", "c"), ("Esc tras c", "<esc>")]),
-                "Años" => extra.extend([("g", "g"), ("g otra vez", "g"), ("g y otra", "g"), ("+ desde el detalle", "<enter>+"), ("- desde Este año", "-")]),
+                "Años" => extra.extend([("g", "g"), ("g otra vez", "g"), ("g y otra", "g"), ("+ desde el detalle", "<enter>+"), ("- desde el detalle", "-"), ("Esc y el anterior", "<esc>-<enter>"), ("Esc tras el anterior", "<esc>")]),
+                "Impuestos" => extra.extend([("← el 4T", "<left>"), ("← el 3T", "<left>"), ("→ → al año", "<right><right>")]),
                 _ => {}
             }
             for (i, (nombre, k)) in extra.iter().enumerate() {
@@ -181,19 +181,48 @@ mod tests {
         }
     }
 
-    /// El año en curso está en «Este año» y los acabados en «Años»: `+` y `-` pasan de una a otra.
+    /// En «Años», el último es el que está en curso: Enter lo abre, con lo que saldría en su Renta; `-` y `+`
+    /// cambian de año sin cerrarlo.
     #[test]
-    fn este_anio_y_los_acabados() {
+    fn el_anio_en_curso_esta_en_anios() {
         let hoy = crate::dominio::fmt::anio_actual();
         let mut a = app();
         ir(&mut a, "Años");
+        assert!(pantalla(&mut a, 120, 36).contains("en curso"), "la fila del año en curso");
         teclas(&mut a, "<enter>");
-        assert_eq!((a.titulo_activa(), a.ctx.anio), ("Años", hoy - 1), "Enter abre el último año acabado");
-        teclas(&mut a, "+");
-        assert_eq!((a.titulo_activa(), a.ctx.anio), ("Este año", hoy));
+        assert_eq!((a.titulo_activa(), a.ctx.anio), ("Años", hoy), "Enter abre el año en curso");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains(&format!("{hoy} · en curso")) && p.contains(&format!("Tu Renta de {hoy}")), "{p}");
         teclas(&mut a, "-");
-        assert_eq!((a.titulo_activa(), a.ctx.anio), ("Años", hoy - 1));
-        assert!(pantalla(&mut a, 120, 36).contains(&format!("{} · sin Renta", hoy - 1)), "vuelve a ese año entero");
+        assert_eq!(a.ctx.anio, hoy - 1);
+        assert!(pantalla(&mut a, 120, 36).contains(&format!("{} · sin Renta", hoy - 1)), "sigue abierto, en el anterior");
+        teclas(&mut a, "+");
+        assert!(pantalla(&mut a, 120, 36).contains(&format!("{hoy} · en curso")), "y vuelve");
+    }
+
+    /// Espacio y una letra llevan a esa entrada del menú, estés donde estés; escribiendo, es un espacio.
+    #[test]
+    fn espacio_y_una_letra() {
+        let mut a = app();
+        teclas(&mut a, "<space>f");
+        assert_eq!(a.titulo_activa(), "Facturas");
+        assert!(pantalla(&mut a, 120, 36).contains("Facturas      f"), "la letra, al lado");
+        teclas(&mut a, "<space>A");
+        assert_eq!(a.titulo_activa(), "Años");
+        teclas(&mut a, "<space><esc>t<space>x");
+        assert_eq!(a.titulo_activa(), "Años", "Esc o una letra sin entrada: nada");
+        // Sin nómina no hay Empleo: «s» no lleva a Sueldo.
+        teclas(&mut a, "<space>s");
+        assert_eq!(a.titulo_activa(), "Años");
+        // Con el menú arriba, las letras salen en una ventana.
+        teclas(&mut a, "<space>");
+        assert!(pantalla(&mut a, 80, 24).contains("Ir a…"));
+        teclas(&mut a, "t");
+        assert_eq!(a.titulo_activa(), "Impuestos");
+        // Buscando, el espacio se escribe.
+        teclas(&mut a, "<space>f/a<space>b");
+        assert_eq!(a.titulo_activa(), "Facturas");
+        assert!(a.pantalla().capturando());
     }
 
     /// Ver una pantalla: `PANTALLA=Sueldo TECLAS="<down>" W=120 H=36 DATOS=mock/ana cargo test ver_pantalla --

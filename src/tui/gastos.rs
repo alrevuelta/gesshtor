@@ -588,7 +588,7 @@ impl Gastos {
             } else {
                 format!("Todavía no hay gastos en {}.", ctx.anio)
             };
-            let pie = if self.cerrado { "Es un año cerrado: se ve en Actividad, con tu Renta." } else { "Pulsa n para añadir uno." };
+            let pie = if self.cerrado { "Es un año cerrado: se ve en Impuestos, con tu Renta." } else { "Pulsa n para añadir uno." };
             let t = vec![Line::from(""), Line::from(txt).centered(), Line::styled(pie, tema::apagado()).centered()];
             f.render_widget(Paragraph::new(t).block(b), area);
             return;

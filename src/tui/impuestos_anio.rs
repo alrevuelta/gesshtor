@@ -1,5 +1,5 @@
-//! Resumen del año: lo facturado y lo gastado, los avisos (plazos, facturas sin cobrar), los trimestres y los
-//! meses en un gráfico. Solo se mira.
+//! La pestaña «Año» de Impuestos: lo facturado y lo gastado, los avisos (plazos, facturas sin cobrar), los
+//! trimestres y los meses en un gráfico. Solo se mira.
 //!
 //! Un año cerrado sin facturas ni gastos en la app se ve con su Renta (ingresos, gastos, cuota, rendimiento) y lo
 //! presentado en cada trimestre (los 303 y 130 de Hacienda).
@@ -13,9 +13,8 @@ use crate::hacienda::{self, Plazo};
 use crate::informe::autonomo::{self, ActividadAnio, Fuente};
 use crate::tui::texto::compacto;
 use crate::tui::widgets::{bloque, derecha, kpi, tema};
-use crate::tui::{Ctx, Pantalla};
+use crate::tui::Ctx;
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -23,9 +22,7 @@ use ratatui::widgets::{Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell
 use crate::dominio::Valor;
 
 #[derive(Default)]
-pub struct Actividad {
-    /// Los meses en una tabla en vez del gráfico.
-    tabla: bool,
+pub(super) struct Anio {
     /// Lo calculado del año que se ve (la cadena de 303 y 130 es cara: no se rehace en cada dibujo).
     calculo: Option<Calculo>,
     /// Cuántas veces se ha calculado (para las pruebas).
@@ -65,7 +62,7 @@ impl Calculo {
 /* ================= cálculos ================= */
 
 /// Ingresos (base de las facturas) y gastos deducibles de cada mes.
-pub fn mensual(d: &Datos, anio: i32) -> ([f64; 12], [f64; 12]) {
+fn mensual(d: &Datos, anio: i32) -> ([f64; 12], [f64; 12]) {
     let mut ing = [0.0; 12];
     let mut gas = [0.0; 12];
     for f in factura::emitidas(d) {
@@ -597,7 +594,7 @@ fn pintar_renta(f: &mut Frame, area: Rect, r: &DeRenta) {
     f.render_widget(Paragraph::new(lineas).wrap(Wrap { trim: false }), dentro);
 }
 
-fn bloque_meses(anio: i32, abajo: &str) -> Block<'static> {
+fn bloque_meses(anio: i32, abajo: Option<String>) -> Block<'static> {
     let titulo = Line::from(vec![
         Span::styled(format!(" Ingresos y gastos por mes · {anio} "), tema::titulo()),
         Span::styled("■", Style::new().fg(tema::ACENTO)),
@@ -605,18 +602,17 @@ fn bloque_meses(anio: i32, abajo: &str) -> Block<'static> {
         Span::styled("■", Style::new().fg(tema::AVISO)),
         Span::styled(" gastos deducibles ", tema::apagado()),
     ]);
-    Block::new()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(tema::apagado())
-        .title(titulo)
-        .title_bottom(Line::styled(format!(" {abajo} "), tema::apagado()).right_aligned())
+    let b = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(tema::apagado()).title(titulo);
+    match abajo {
+        Some(t) => b.title_bottom(Line::styled(format!(" {t} "), tema::apagado()).right_aligned()),
+        None => b,
+    }
 }
 
 /// Barras de ingresos y gastos, mes a mes, con el importe dentro si cabe («1,2k»).
 fn pintar_grafico(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
     let max = c.ing.iter().chain(&c.gas).fold(0.0_f64, |m, x| m.max(*x));
-    let b = bloque_meses(anio, &if max > 0.5 { format!("máx. {} · g tabla", compacto(max)) } else { "g tabla".into() });
+    let b = bloque_meses(anio, (max > 0.5).then(|| format!("máx. {}", compacto(max))));
     let dentro = b.inner(area);
     f.render_widget(b, area);
     if dentro.height < 2 || dentro.width < 4 {
@@ -658,9 +654,9 @@ fn pintar_grafico(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
     f.render_widget(grafico, zona);
 }
 
-/// Los meses en una tabla: ingresos, gastos y la diferencia (importes cortos).
+/// Los meses en una tabla: ingresos, gastos y la diferencia (importes cortos). Para cuando el gráfico no cabe.
 fn pintar_tabla_meses(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
-    let b = bloque_meses(anio, "g gráfico");
+    let b = bloque_meses(anio, None);
     let dentro = b.inner(area);
     f.render_widget(b, area);
     let lw = 11usize;
@@ -689,7 +685,7 @@ fn pintar_tabla_meses(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
     f.render_widget(Paragraph::new(t), dentro);
 }
 
-impl Actividad {
+impl Anio {
     /// Lo calculado del año que se ve; se rehace si cambian los datos, el año o el día.
     fn preparar(&mut self, ctx: &Ctx) -> &Calculo {
         let hoy = fmt::hoy();
@@ -705,25 +701,12 @@ impl Actividad {
         self.calculo.as_ref().expect("recién calculado")
     }
 
-    /// ¿Se ve con la Renta? (según lo último calculado)
-    fn con_renta(&self) -> bool {
-        self.calculo.as_ref().is_some_and(|c| matches!(c.vista, Vista::Renta(_)))
-    }
-}
-
-impl Pantalla for Actividad {
-    fn titulo(&self) -> &'static str {
-        "Actividad"
-    }
-
-    fn al_entrar(&mut self, ctx: &mut Ctx) {
-        // Al entrar se recalcula siempre (por si los datos cambiaron sin pasar por `guardar`).
+    /// Para recalcular (al entrar en la pestaña, por si los datos cambiaron sin pasar por `guardar`).
+    pub(super) fn olvidar(&mut self) {
         self.calculo = None;
-        self.preparar(ctx);
     }
 
-    fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
-        let tabla = self.tabla;
+    pub(super) fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         let c = self.preparar(ctx);
         let hoy = &c.clave.2;
         let av = &c.avisos;
@@ -740,10 +723,11 @@ impl Pantalla for Actividad {
         match &c.vista {
             Vista::App(cf) => {
                 pintar_trimestres(f, a_trim, c.trims(), &format!("Trimestres de {anio}"));
-                if tabla && a_mes.height >= 4 {
-                    pintar_tabla_meses(f, a_mes, cf, anio);
-                } else if a_mes.height >= 6 {
+                // Con poca altura, el gráfico no se lee: mejor la tabla.
+                if a_mes.height >= 8 {
                     pintar_grafico(f, a_mes, cf, anio);
+                } else if a_mes.height >= 5 {
+                    pintar_tabla_meses(f, a_mes, cf, anio);
                 }
             }
             Vista::Renta(r) => {
@@ -753,26 +737,5 @@ impl Pantalla for Actividad {
                 }
             }
         }
-    }
-
-    fn tecla(&mut self, k: KeyEvent, ctx: &mut Ctx) -> bool {
-        match k.code {
-            KeyCode::Char('g') if self.con_renta() => {
-                ctx.info(format!("{} se ve con tu Renta: no hay meses en la app.", ctx.anio));
-                true
-            }
-            KeyCode::Char('g') => {
-                self.tabla = !self.tabla;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn atajos(&self) -> Vec<(&'static str, &'static str)> {
-        if self.con_renta() {
-            return vec![];
-        }
-        vec![("g", if self.tabla { "ver gráfico" } else { "ver tabla" })]
     }
 }

@@ -1,6 +1,7 @@
 //! La lista de «Años»: arriba un gráfico (lo que ganas y pagas por conceptos, lo mismo en sencillo, o lo que salió
 //! en cada Renta) y debajo una tabla, un año por fila: lo que ganaste por partes, lo que pagaste, lo que te quedó y
-//! lo que salió en tu Renta. Los años sin Renta van en gris: sus cifras no son las de Hacienda.
+//! lo que salió en tu Renta. Los años sin Renta (también el que está en curso) van en gris: sus cifras no son las de
+//! Hacienda.
 use crate::dominio::fmt::DIF;
 use super::anios::{Anios, COLOR_EMPRESA, COLOR_PAGAS, COLOR_QUEDA};
 use super::anios_grafico::{self as grafico, Modo};
@@ -59,9 +60,9 @@ impl Anios {
     pub(super) fn dibujar_lista(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         if self.serie.is_empty() {
             let t = vec![
-                Line::styled(format!("Aún no hay ningún año acabado con datos desde {PRIMER_ANIO}."), Style::new().add_modifier(Modifier::BOLD)),
+                Line::styled(format!("Aún no hay ningún año con datos desde {PRIMER_ANIO}."), Style::new().add_modifier(Modifier::BOLD)),
                 Line::from(""),
-                Line::styled("Lo de este año está en «Este año». Los acabados salen de tus Rentas, la Seguridad Social y lo que apuntes.", tema::apagado()),
+                Line::styled("Salen de tus Rentas, la Seguridad Social y lo que apuntes (nóminas, facturas, gastos).", tema::apagado()),
             ];
             f.render_widget(Paragraph::new(t).wrap(ratatui::widgets::Wrap { trim: true }).block(bloque("Años")), area);
             return;
@@ -108,6 +109,7 @@ impl Anios {
         cols.push(("%", 4, true, Box::new(|_, a: &Anio| if a.ganas > DIF { (format!("{:.0} %", a.queda / a.ganas * 100.0), tema::apagado()) } else { (String::new(), tema::apagado()) })));
         let resultados = &self.resultados;
         let pendiente = self.pendiente.as_ref().map(|p| p.0);
+        let hoy = crate::dominio::fmt::anio_actual();
         cols.push((
             "Renta",
             1,
@@ -115,6 +117,7 @@ impl Anios {
             Box::new(move |i, a: &Anio| match resultados[i] {
                 Some(x) => resultado(x),
                 None if Some(a.y) == pendiente => ("pendiente".into(), Style::new().fg(tema::AVISO)),
+                None if a.y >= hoy => ("en curso".into(), Style::new().fg(tema::ACENTO)),
                 None => ("sin Renta".into(), tema::apagado()),
             }),
         ));

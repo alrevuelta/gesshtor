@@ -1,25 +1,26 @@
-//! «Años»: los años acabados, uno por fila, con lo que ganaste por partes, lo que pagaste y lo que te quedó, y lo
-//! que salió en tu Renta; Enter abre uno entero (su balance y su Renta casilla a casilla). El año en curso no está:
-//! va en «Este año». Las cifras salen de `informe::anio`; aquí solo se pintan, y se rehacen solo cuando cambian los
-//! datos (`ctx.generacion`) o el año.
+//! «Años»: un año por fila (el último, el que está en curso), con lo que ganaste por partes, lo que pagaste y lo que
+//! te quedó, y lo que salió en tu Renta; Enter abre uno entero (su balance y su Renta casilla a casilla). Las cifras
+//! salen de `informe::anio`; aquí solo se pintan, y se rehacen solo cuando cambian los datos (`ctx.generacion`) o el
+//! año.
 //!
 //! - `anios_lista`: el gráfico y la tabla.
-//! - `anios_balance`: un año: cada cifra explicada y de dónde sale.
+//! - `anios_balance`: un año: sus cifras y su Renta casilla a casilla.
 //! - `anios_renta`: la Renta de un año, casilla a casilla, y el gráfico de lo que salió cada año.
 //! - `anios_grafico`: las barras apiladas del gráfico.
+//! - `anios_reparto`: un año, cada fuente paso a paso y de dónde sale cada cifra.
 
 use crate::dominio::fmt;
-use crate::informe::anio::{Anio, Concepto, Fila, Fuente, Origen, euro};
+use crate::informe::anio::{Anio, Concepto};
 use crate::dominio::PRIMER_ANIO;
 use crate::informe;
-use crate::tui::texto::{envolver, fila};
+use crate::tui::texto::envolver;
 use crate::tui::widgets::tema;
 use crate::tui::{Ctx, Pantalla};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::TableState;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -92,42 +93,6 @@ fn copiar(de: &Buffer, a: &mut Buffer, area: Rect) {
     }
 }
 
-/// «■ » del color del concepto (o un hueco).
-fn muestra(c: Option<Concepto>) -> Span<'static> {
-    match c {
-        Some(c) => Span::styled("■ ", Style::new().fg(color(c))),
-        None => Span::raw("  "),
-    }
-}
-
-/// Una cifra explicada: nombre e importe (con «≈» si es estimada), y debajo su nota y de dónde sale (en gris,
-/// partido). `sub`: un desglose de la de arriba (en gris).
-pub(super) fn explicada(x: &Fila, w: usize, sangria: usize, sub: bool) -> Vec<Line<'static>> {
-    let gris = tema::apagado();
-    let st = if x.aparte || sub { gris } else { Style::new() };
-    let valor = match x.importe {
-        Some(v) if x.origen == Origen::Estimado => format!("≈{}", euro(v)),
-        Some(v) => euro(v),
-        None => "sin datos".into(),
-    };
-    let st_v = if x.importe.is_none() { gris } else { st };
-    let mut l = fila(&x.nombre, &valor, w.saturating_sub(2 + sangria), st, st_v);
-    l.spans.insert(0, muestra(x.concepto));
-    l.spans.insert(0, Span::raw(" ".repeat(sangria)));
-    let mut v = vec![l];
-    let mut trozos = Vec::new();
-    if !x.nota.is_empty() {
-        trozos.push((x.nota.clone(), gris));
-    }
-    let fuentes: Vec<String> = x.fuentes.iter().map(Fuente::texto).filter(|t| !t.is_empty()).collect();
-    if !fuentes.is_empty() {
-        let sep = if trozos.is_empty() { "" } else { "· " };
-        trozos.push((format!("{sep}{}", fuentes.join(" · ")), gris.add_modifier(Modifier::ITALIC)));
-    }
-    v.extend(envolver(&trozos, w, sangria + 2));
-    v
-}
-
 /// Unas notas, cada una con «• » delante.
 pub(super) fn vinetas(notas: Vec<(String, Style)>, w: usize) -> Vec<Line<'static>> {
     notas
@@ -150,7 +115,7 @@ pub(super) fn vinetas(notas: Vec<(String, Style)>, w: usize) -> Vec<Line<'static
 pub struct Anios {
     /// La generación de los datos con que se calculó la serie.
     pub(super) clave: Option<u64>,
-    /// Los años acabados con algo, del primero al anterior al actual.
+    /// Los años con algo, del primero al actual.
     pub(super) serie: Vec<Anio>,
     /// Lo que salió en la Renta de cada año de `serie` (None: no hay Renta).
     pub(super) resultados: Vec<Option<f64>>,
@@ -170,7 +135,7 @@ impl Anios {
     fn al_dia(&mut self, ctx: &Ctx) {
         if self.clave != Some(ctx.generacion) {
             let hoy = fmt::anio_actual();
-            self.serie = informe::anio::serie(&ctx.datos).into_iter().filter(|a| a.y < hoy).collect();
+            self.serie = informe::anio::serie(&ctx.datos);
             self.resultados = self.serie.iter().map(|a| informe::renta_de(&ctx.datos, a.y).map(|r| r.resultado)).collect();
             self.pendiente = informe::renta_pendiente(&ctx.datos, hoy - 1).map(|fin| (hoy - 1, fin));
             self.clave = Some(ctx.generacion);
@@ -226,12 +191,6 @@ impl Pantalla for Anios {
     }
 
     fn tecla(&mut self, k: KeyEvent, ctx: &mut Ctx) -> bool {
-        // El año en curso está en «Este año».
-        if matches!(k.code, KeyCode::Char('+' | '=' | ']')) && ctx.anio + 1 >= fmt::anio_actual() {
-            ctx.anio = fmt::anio_actual();
-            ctx.ir_a = Some("Este año");
-            return true;
-        }
         if self.detalle {
             match k.code {
                 KeyCode::Esc | KeyCode::Backspace => self.detalle = false,
@@ -255,7 +214,7 @@ impl Pantalla for Anios {
                     self.vista.olvidar();
                 }
                 Some(y) => Self::pdf(ctx, y),
-                None => ctx.error(format!("Aún no hay ningún año acabado con datos desde {PRIMER_ANIO}.")),
+                None => ctx.error(format!("Aún no hay ningún año con datos desde {PRIMER_ANIO}.")),
             },
             _ => return false,
         }
@@ -281,8 +240,5 @@ impl Pantalla for Anios {
         self.vista.olvidar();
         self.al_dia(ctx);
         self.seguir(ctx.anio);
-        if ctx.anio >= fmt::anio_actual() {
-            self.detalle = false;
-        }
     }
 }

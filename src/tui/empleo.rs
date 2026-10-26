@@ -1,7 +1,7 @@
 //! Empleo: dos entradas, una para ver y otra para apuntar. Las cifras salen de `informe::empleo`; aquí se pintan.
 //!
 //! - `empleo_sueldo`: el año (de tu Renta, tus nóminas o la Seguridad Social), si te retienen bien y mes a mes; con
-//!   el detalle de cada mes (`empleo_mes`) y el camino del dinero (`empleo_camino`).
+//!   el detalle de cada mes (`empleo_mes`).
 //! - `empleo_nominas`: las nóminas apuntadas, una por mes, en cualquier año desde 2020.
 
 use crate::informe::empleo::{empleo_anio, EmpleoAnio};
@@ -91,16 +91,6 @@ impl From<Line<'static>> for Fila {
 /// Las líneas de un texto, como filas.
 pub(super) fn filas(v: Vec<Line<'static>>) -> Vec<Fila> {
     v.into_iter().map(Fila::from).collect()
-}
-
-/// Las mismas filas, con `n` espacios delante.
-pub(super) fn sangrar(v: Vec<Line<'static>>, n: usize) -> Vec<Fila> {
-    v.into_iter()
-        .map(|mut l| {
-            l.spans.insert(0, Span::raw(" ".repeat(n)));
-            Fila::from(l)
-        })
-        .collect()
 }
 
 /// Una fila de `w` caracteres: a la izquierda un texto (recortado si no cabe) y a la derecha unas columnas de

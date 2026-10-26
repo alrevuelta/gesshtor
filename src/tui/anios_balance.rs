@@ -1,13 +1,17 @@
-//! Un año entero (Enter en «Años»): lo que ganaste, lo que pagaste y lo que te quedó, cada cifra con de dónde sale
-//! (en los años con Renta, sus casillas); y debajo, la Renta casilla a casilla.
+//! Un año entero (Enter en «Años»): arriba, lo que generaste, lo que se llevaron impuestos y cotizaciones y lo que
+//! te quedó; dentro, cada fuente paso a paso, con de dónde sale cada cifra (`anios_reparto`); y debajo, la Renta
+//! casilla a casilla. Con Renta, es el resumen de tu modelo 100 (con `o` se abre su PDF). El año en curso, hasta
+//! hoy y con lo que saldría en tu Renta, si se puede estimar.
 use crate::dominio::fmt::DIF;
-use super::anios::{COLOR_EMPRESA, COLOR_PAGAS, COLOR_QUEDA, Lienzo, explicada, vinetas};
+use super::anios::Lienzo;
 use super::anios_renta as renta;
+use super::anios_reparto;
+use crate::informe::reparto::{self, Reparto};
 use crate::dominio::renta::Renta;
 use crate::dominio::fmt::{self, eur, eur0};
-use crate::informe::anio::{self, Concepto, Detalle, Fila, Fuente, euro, pct};
+use crate::informe::anio::{self, Detalle, euro, pct};
+use crate::informe::prevision::{self, Prevision};
 use crate::informe::{self};
-use crate::tui::texto::{dos_columnas, envolver, fila};
 use crate::tui::widgets::{kpi, tema};
 use crate::tui::Ctx;
 use ratatui::Frame;
@@ -17,7 +21,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-/// Desde este ancho, lo que ganas y lo que pagas van en dos columnas.
+/// Desde este ancho, la Renta casilla a casilla va en dos columnas.
 const ANCHO_DOS_COLUMNAS: u16 = 100;
 
 /// Lo de un año, ya calculado, y por dónde se va bajando.
@@ -28,12 +32,14 @@ pub(super) struct Vista {
     /// El año que se veía (al cambiar de año se vuelve arriba).
     visto: Option<i32>,
     d: Detalle,
+    /// A dónde fue lo de cada fuente.
+    rep: Reparto,
     /// Su Renta, cuándo se presentó y, si aún no está, hasta cuándo se puede presentar.
     renta: Option<Renta>,
     presentada: Option<String>,
     pendiente: Option<String>,
-    /// Tiene o tuvo nómina: se enseña lo que pagó su empresa.
-    empleo: bool,
+    /// El año en curso: lo que saldría en su Renta.
+    prevision: Option<Prevision>,
     scroll: u16,
     scroll_max: u16,
     lienzo: Lienzo,
@@ -41,10 +47,6 @@ pub(super) struct Vista {
 
 fn gris() -> Style {
     tema::apagado()
-}
-
-fn negrita() -> Style {
-    Style::new().add_modifier(Modifier::BOLD)
 }
 
 impl Vista {
@@ -62,7 +64,8 @@ impl Vista {
         self.renta = informe::renta_de(&ctx.datos, ctx.anio).cloned();
         self.presentada = crate::hacienda::presentada(&ctx.datos, ctx.anio, 0, crate::hacienda::Modelo::M100).map(|d| d.fecha);
         self.pendiente = informe::renta_pendiente(&ctx.datos, ctx.anio);
-        self.empleo = informe::situacion(&ctx.datos).empleo;
+        self.rep = reparto::reparto(&ctx.datos, &self.d, self.renta.as_ref());
+        self.prevision = self.en_curso().then(|| prevision::prevision(&ctx.datos, ctx.anio, &self.d));
         self.clave = Some(k);
     }
 
@@ -74,6 +77,11 @@ impl Vista {
 
     pub(super) fn con_renta(&self) -> bool {
         self.d.anio.con_renta
+    }
+
+    /// El año en curso (sin Renta todavía).
+    fn en_curso(&self) -> bool {
+        self.d.anio.y >= fmt::anio_actual() && !self.con_renta()
     }
 
     pub(super) fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -93,36 +101,44 @@ impl Vista {
         self.cuerpo(f, a_cuerpo);
     }
 
-    /// Las cuatro cifras de arriba (tres si nunca tuvo nómina).
+    /// Las tres cifras de arriba, con las mismas palabras que «Todo junto»; en el año en curso, también lo que
+    /// saldría en tu Renta.
     fn kpis(&self, f: &mut Frame, area: Rect, grande: bool) {
-        let a = &self.d.anio;
-        let con_empresa = self.empleo || a.empresa > DIF;
-        let n = if con_empresa { 4 } else { 3 };
+        let (a, t) = (&self.d.anio, &self.rep.total);
+        let n = if self.prevision.is_some() { 4 } else { 3 };
         let zonas = Layout::horizontal(vec![Constraint::Ratio(1, n); n as usize]).split(area);
         let w = zonas[0].width.saturating_sub(2) as usize;
         let cabe = |largo: String, corto: &str| if largo.chars().count() <= w { largo } else { corto.to_string() };
-        let ss = a.seguridad_social();
-        let nota_ganas = if a.sueldo_aprox {
-            "el sueldo, aproximado".to_string()
-        } else if a.especie > DIF {
-            cabe(format!("{} en especie", eur0(a.especie)), "con especie")
+        let generado = fmt::r2(t.generado - t.iva);
+        let nota_generado = if a.sueldo_aprox {
+            cabe("con el sueldo aproximado".into(), "aproximado")
+        } else if a.empresa > DIF {
+            cabe("con lo que pagó tu empresa por ti".into(), "con tu empresa")
+        } else if self.en_curso() {
+            "hasta hoy".into()
         } else {
             cabe("antes de impuestos".into(), "bruto")
         };
-        let nota_pagas = if a.falta_nomina {
+        let nota_impuestos = if a.falta_nomina {
             cabe("sin el IRPF de tu nómina".into(), "sin IRPF nómina")
+        } else if t.base() > DIF {
+            cabe(format!("el {} de lo que generaste", pct(t.impuestos(), t.base())), &pct(t.impuestos(), t.base()))
         } else {
-            cabe(format!("IRPF {} · SS {}", eur0(a.de(Concepto::Irpf)), eur0(ss)), "IRPF y Seg. Social")
+            String::new()
         };
-        let nota_queda = if a.ganas > DIF { cabe(format!("el {} de lo que ganas", pct(a.queda, a.ganas)), &pct(a.queda, a.ganas)) } else { String::new() };
+        let nota_queda = if a.especie > DIF { cabe(format!("{} en especie", eur0(a.especie)), "con especie") } else { String::new() };
         let mut cifras = vec![
-            ("Lo que ganas".to_string(), euro(a.ganas), nota_ganas, Style::new()),
-            ("Lo que pagas".to_string(), eur(a.pagas), nota_pagas, Style::new().fg(COLOR_PAGAS)),
-            (cabe("Lo que te queda".into(), "Te queda"), euro(a.queda), nota_queda, Style::new().fg(if a.queda < -DIF { tema::MAL } else { COLOR_QUEDA })),
+            (cabe("Lo que generaste".into(), "Generaste"), euro(generado), nota_generado, Style::new()),
+            (cabe("Impuestos y cotizaciones".into(), "Impuestos"), eur(t.impuestos()), nota_impuestos, Style::new().fg(tema::MAL)),
+            ("Te queda".to_string(), euro(t.queda), nota_queda, Style::new().fg(if t.queda < -DIF { tema::MAL } else { tema::BIEN })),
         ];
-        if con_empresa {
-            let (v, nota) = if a.empresa > DIF { (eur(a.empresa), cabe("su Seguridad Social por ti".into(), "Seg. Social")) } else { ("—".to_string(), cabe(format!("sin nómina en {}", a.y), "sin nómina")) };
-            cifras.push((cabe("Tu empresa pagó por ti".into(), "Tu empresa"), v, nota, Style::new().fg(COLOR_EMPRESA)));
+        match &self.prevision {
+            Some(Prevision::Estimada { resultado: x, .. }) => {
+                let que = if *x > DIF { "a pagar" } else if *x < -DIF { "a devolver" } else { "a cero" };
+                cifras.push((cabe(format!("Tu Renta de {}", a.y), "Tu Renta"), format!("≈{}", eur0(x.abs())), cabe(format!("{que}, estimado"), que), tema::importe(*x)));
+            }
+            Some(Prevision::NoSe(_)) => cifras.push((cabe(format!("Tu Renta de {}", a.y), "Tu Renta"), "—".into(), cabe(format!("en abril de {}", a.y + 1), "más adelante"), gris())),
+            None => {}
         }
         for ((etq, v, nota, st), z) in cifras.into_iter().zip(zonas.iter()) {
             if grande {
@@ -134,51 +150,37 @@ impl Vista {
         }
     }
 
-    /// El recuadro con el desglose: el año y de dónde sale arriba; dentro, lo que ganas y lo que pagas, y la Renta.
-    fn cuerpo(&mut self, f: &mut Frame, area: Rect) {
-        let d = &self.d;
-        let y = d.anio.y;
-        let (modo, st_modo, resto) = if d.anio.con_renta {
-            ("con Renta", Style::new().fg(tema::BIEN), format!("según tu Renta de {y} y la Seguridad Social"))
-        } else if let Some(fin) = &self.pendiente {
-            ("Renta pendiente", Style::new().fg(tema::AVISO), format!("se presenta hasta el {}: hasta entonces, con la Seguridad Social y lo apuntado", fmt::fecha_corta(fin)))
+    /// «2024 · resumen de tu Renta: modelo 100, rectificativa, presentada el 15 abr 2025»; sin Renta, con qué se ha
+    /// hecho la cuenta.
+    fn titulo(&self) -> Line<'static> {
+        let y = self.d.anio.y;
+        let mut v = vec![Span::styled(format!(" {y} "), tema::titulo()), Span::styled("· ", gris())];
+        if self.en_curso() {
+            v.push(Span::styled("en curso", Style::new().fg(tema::AVISO).add_modifier(Modifier::BOLD)));
+            v.push(Span::styled(": hasta hoy, con la Seguridad Social y lo apuntado ", gris()));
+        } else if let Some(r) = self.renta.as_ref().filter(|_| self.d.anio.con_renta) {
+            let rect = if r.rectificativa { ", rectificativa" } else { "" };
+            let cuando = self.presentada.as_deref().map(|p| format!(", presentada el {}", fmt::fecha_corta(p))).unwrap_or_default();
+            v.push(Span::styled("resumen de tu Renta", Style::new().fg(tema::BIEN).add_modifier(Modifier::BOLD)));
+            v.push(Span::styled(format!(": modelo 100{rect}{cuando} "), gris()));
         } else {
-            ("sin Renta", Style::new().fg(tema::AVISO), "con la Seguridad Social y lo apuntado".into())
-        };
-        let titulo = Line::from(vec![
-            Span::styled(format!(" {y} "), tema::titulo()),
-            Span::styled("· ", gris()),
-            Span::styled(modo, st_modo.add_modifier(Modifier::BOLD)),
-            Span::styled(format!(": {resto} "), gris()),
-        ]);
+            let (modo, resto) = match &self.pendiente {
+                Some(fin) => ("Renta pendiente", format!("se presenta hasta el {}: hasta entonces, con la Seguridad Social y lo apuntado", fmt::fecha_corta(fin))),
+                None => ("sin Renta", "con la Seguridad Social y lo apuntado".into()),
+            };
+            v.push(Span::styled(modo, Style::new().fg(tema::AVISO).add_modifier(Modifier::BOLD)));
+            v.push(Span::styled(format!(": {resto} "), gris()));
+        }
+        Line::from(v)
+    }
+
+    /// Un recuadro con su título y estas líneas, que se bajan con ↑↓ si no caben. Con Renta, abajo, cómo abrir su PDF.
+    fn recuadro(&mut self, f: &mut Frame, area: Rect, titulo: Line<'static>, lineas: Vec<Line<'static>>) {
         let mut b = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(gris()).title(titulo);
+        if self.con_renta() {
+            b = b.title_bottom(Line::styled(" o: abrir el PDF del modelo 100 ", gris()));
+        }
         let dentro = b.inner(area);
-        if dentro.height == 0 || dentro.width < 10 {
-            f.render_widget(b, area);
-            return;
-        }
-
-        let w = dentro.width as usize;
-        let dos = dentro.width >= ANCHO_DOS_COLUMNAS;
-        let wc = if dos { ((w - 3) / 2).min(72) } else { w.min(90) };
-        let mut lineas = if dos {
-            dos_columnas(self.ganas(wc), self.pagas(wc), wc)
-        } else {
-            let mut v = self.ganas(wc);
-            v.push(Line::from(""));
-            v.extend(self.pagas(wc));
-            v
-        };
-        let notas = self.notas(if dos { (wc * 2 + 3).min(w) } else { wc });
-        if !notas.is_empty() {
-            lineas.push(Line::from(""));
-            lineas.extend(notas);
-        }
-        if let Some(r) = &self.renta {
-            lineas.push(Line::from(""));
-            lineas.extend(renta::lineas(y, r, self.presentada.as_deref(), wc, dos));
-        }
-
         let alto = dentro.height;
         self.scroll_max = (lineas.len() as u16).saturating_sub(alto);
         self.scroll = self.scroll.min(self.scroll_max);
@@ -190,136 +192,26 @@ impl Vista {
         f.render_widget(Paragraph::new(lineas).scroll((self.scroll, 0)), dentro);
     }
 
-    fn cabecera(nombre: &str, valor: &str, w: usize) -> Line<'static> {
-        fila(nombre, valor, w, tema::titulo(), negrita())
+    /// Cada fuente paso a paso y, debajo, la Renta casilla a casilla.
+    fn cuerpo(&mut self, f: &mut Frame, area: Rect) {
+        let titulo = self.titulo();
+        let dentro = Block::new().borders(Borders::ALL).inner(area);
+        if dentro.height == 0 || dentro.width < 10 {
+            self.recuadro(f, area, titulo, Vec::new());
+            return;
+        }
+        let w = dentro.width as usize;
+        let mut lineas = anios_reparto::lineas(&self.rep, &self.d, self.prevision.as_ref(), w.min(100));
+        if let Some(r) = &self.renta {
+            let dos = dentro.width >= ANCHO_DOS_COLUMNAS;
+            let wr = if dos { ((w - 3) / 2).min(72) } else { w.min(90) };
+            lineas.push(Line::from(""));
+            lineas.extend(renta::lineas(self.d.anio.y, r, self.presentada.as_deref(), wr, dos));
+        }
+        self.recuadro(f, area, titulo, lineas);
     }
 
-    /// «Lo que ganas», concepto a concepto.
-    fn ganas(&self, w: usize) -> Vec<Line<'static>> {
-        let d = &self.d;
-        let a = &d.anio;
-        let mut l = vec![Self::cabecera("Lo que ganas", &euro(a.ganas), w)];
-        if d.ganado.filas.is_empty() {
-            l.push(Line::styled("Sin ingresos.", gris()));
-        }
-        for x in &d.ganado.filas {
-            l.extend(explicada(x, w, 0, false));
-        }
-        l.extend(envolver(
-            &[("Antes de impuestos y cotizaciones. De tu actividad cuenta lo facturado menos tus gastos, sin la cuota de autónomo (va en lo que pagas).".into(), gris())],
-            w,
-            0,
-        ));
-        l
-    }
-
-    /// «Lo que pagas»: el IRPF (lo que te tocó y cómo se pagó) y la Seguridad Social; y lo que pagó tu empresa.
-    fn pagas(&self, w: usize) -> Vec<Line<'static>> {
-        let d = &self.d;
-        let a = &d.anio;
-        let ir = &d.irpf;
-        let mut l = vec![Self::cabecera("Lo que pagas", &eur(a.pagas), w)];
-
-        // IRPF.
-        let nombre = if ir.con_renta { "Hacienda: IRPF".to_string() } else { "Hacienda: IRPF adelantado".to_string() };
-        let irpf = Fila { nombre, importe: Some(ir.total), fuentes: ir.fuente.clone(), concepto: Some(Concepto::Irpf), ..Default::default() };
-        l.extend(explicada(&irpf, w, 0, false));
-        if !ir.toco.is_empty() {
-            for x in &ir.toco {
-                l.extend(explicada(x, w, 2, true));
-            }
-        }
-        if !ir.filas.is_empty() {
-            l.push(Line::styled(if ir.con_renta { "  Cómo lo pagaste:" } else { "  Lo adelantado:" }, gris().add_modifier(Modifier::BOLD)));
-            for x in &ir.filas {
-                l.extend(explicada(x, w, 2, true));
-            }
-        } else if !ir.con_renta {
-            l.push(Line::styled(format!("  Todavía no hay nada de IRPF en {}.", a.y), gris()));
-        }
-        if !ir.con_renta && a.y >= fmt::anio_actual() - 1 {
-            let t = format!("La Renta de {} se presenta de abril a junio de {}: entonces sale tu IRPF del año.", a.y, a.y + 1);
-            l.extend(envolver(&[(t, gris())], w, 2));
-        }
-
-        // Seguridad Social: tu parte de la nómina y tu cuota de autónomo.
-        if let Some(n) = d.nomina.as_ref().filter(|n| n.con_nomina > 0) {
-            let meses = n.texto_meses();
-            let sol = if a.tu_solidaridad > DIF { format!("{} de solidaridad", eur(a.tu_solidaridad)) } else { String::new() };
-            let x = Fila {
-                nombre: "Seguridad Social: tu parte de la nómina".into(),
-                importe: Some(n.cuota.trabajador),
-                nota: sol,
-                fuentes: vec![Fuente::Texto(format!("Seguridad Social · {meses}"))],
-                concepto: Some(Concepto::TuNomina),
-                ..Default::default()
-            };
-            l.extend(explicada(&x, w, 0, false));
-        }
-        if let Some(c) = &d.cuota {
-            let x = Fila {
-                nombre: "Seguridad Social: tu cuota de autónomo".into(),
-                importe: Some(c.total),
-                fuentes: vec![Fuente::Texto(c.de.clone())],
-                concepto: Some(Concepto::Cuota),
-                ..Default::default()
-            };
-            l.extend(explicada(&x, w, 0, false));
-        }
-
-        // Lo que pagó tu empresa (no suma: no sale de lo que ganas).
-        if let Some(n) = d.nomina.as_ref().filter(|n| n.con_nomina > 0) {
-            l.push(Line::from(""));
-            l.push(fila("Tu empresa pagó por ti", &eur(n.cuota.empresa), w, tema::titulo(), Style::new().fg(COLOR_EMPRESA).add_modifier(Modifier::BOLD)));
-            for (nombre, _, p) in n.grupos_con_algo() {
-                let valor = if p.trabajador.abs() > DIF { format!("{}  tú {}", eur(p.empresa), eur(p.trabajador)) } else { eur(p.empresa) };
-                let mut x = fila(nombre, &valor, w.saturating_sub(2), gris(), Style::new());
-                x.spans.insert(0, Span::raw("  "));
-                l.push(x);
-            }
-            if !n.empresas.is_empty() {
-                let empresas: Vec<&str> = n.empresas.keys().map(String::as_str).collect();
-                l.extend(envolver(&[(empresas.join(", "), gris().add_modifier(Modifier::ITALIC))], w, 2));
-            }
-            l.extend(envolver(&[("Es la parte de la Seguridad Social que paga tu empresa: no la ves en tu nómina, pero se gasta en ti.".into(), gris())], w, 2));
-        }
-        l
-    }
-
-    /// Lo que conviene saber, a todo lo ancho.
-    fn notas(&self, w: usize) -> Vec<Line<'static>> {
-        let d = &self.d;
-        let mut v: Vec<(String, Style)> = d
-            .notas
-            .iter()
-            .map(|n| {
-                let fuerte = n.starts_with("Declaración conjunta") || n.starts_with("Falta");
-                (n.clone(), if fuerte { Style::new().fg(tema::AVISO) } else { gris() })
-            })
-            .collect();
-        if let Some(c) = &d.cuna {
-            let de = if c.sueldo_de_renta { format!("tu Renta de {}", d.anio.y) } else { "por el que cotizaste".into() };
-            let especie = if c.especie > DIF { format!(", de los que {} fueron en especie", eur(c.especie)) } else { String::new() };
-            v.push((
-                format!(
-                    "Tu nómina le costó a tu empresa unos {}: {} de sueldo bruto ({de}) y {} de su Seguridad Social. De eso, {} ({}) fueron a Hacienda y a la Seguridad Social. A ti te quedaron {}{especie}.",
-                    eur(c.coste),
-                    eur(c.sueldo),
-                    eur(c.empresa),
-                    eur(c.impuestos),
-                    pct(c.impuestos, c.coste),
-                    eur(fmt::r2(c.coste - c.impuestos)),
-                ),
-                gris(),
-            ));
-        }
-        if d.cuota.is_some() || d.nomina.as_ref().is_some_and(|n| n.con_nomina > 0) {
-            v.push(("Las cotizaciones no son impuestos: dan derecho a pensión, paro y bajas. Aun así se suman a lo que pagas.".into(), gris()));
-        }
-        vinetas(v, w)
-    }
-
-    /// Bajar por el desglose. Devuelve true si ha usado la tecla.
+    /// Bajar por el año. Devuelve true si ha usado la tecla.
     pub(super) fn tecla(&mut self, k: KeyEvent) -> bool {
         match k.code {
             // Al bajar no se mira el tope: se ajusta al pintar, que es cuando se sabe cuánto cabe.

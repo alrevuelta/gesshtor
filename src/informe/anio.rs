@@ -546,21 +546,6 @@ pub fn cuota_autonomo(d: &Datos, y: i32, r: Option<&Renta>) -> Option<CuotaAuton
     (g.abs() > DIF).then(|| CuotaAutonomo { total: g, origen: OrigenCuota::Gastos, recibos: 0, de: "tus gastos de cuota de autónomos".into() })
 }
 
-/* ================= lo cotizado por tu nómina ================= */
-
-/// Lo que le costó tu nómina a tu empresa y cuánto fue a Hacienda y a la Seguridad Social (`cuna`).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Cuna {
-    pub coste: f64,
-    pub sueldo: f64,
-    /// El sueldo sale de tu Renta (si no, de lo cotizado).
-    pub sueldo_de_renta: bool,
-    pub empresa: f64,
-    /// Lo que fue a Hacienda y a la Seguridad Social: el IRPF retenido, tu cotización y la suya.
-    pub impuestos: f64,
-    pub especie: f64,
-}
-
 /* ================= el año ================= */
 
 /// Las cifras de un año, con las mismas cuentas y partes que la pantalla (`datosAnio`).
@@ -616,7 +601,6 @@ pub struct Detalle {
     pub cuota: Option<CuotaAutonomo>,
     /// Lo que dice la Seguridad Social de tus nóminas de ese año.
     pub nomina: Option<NominaAnio>,
-    pub cuna: Option<Cuna>,
     /// Lo que conviene saber (conjunta, lo que falta…), en frases cortas.
     pub notas: Vec<String>,
 }
@@ -665,15 +649,6 @@ pub fn detalle(d: &Datos, y: i32) -> Detalle {
         sin_ahorro: ganado.sin_ahorro,
     };
 
-    let cuna = match (&n, irpf.nomina) {
-        (Some(n), Some(ret)) if n.con_nomina > 0 && ret > 0.0 => {
-            let t = r.and_then(|r| r.trabajo.as_ref());
-            let sueldo = t.map_or(n.sueldo, |t| t.integros);
-            let coste = r2(sueldo + n.cuota.empresa);
-            Some(Cuna { coste, sueldo, sueldo_de_renta: t.is_some(), empresa: n.cuota.empresa, impuestos: r2(n.cuota.empresa + n.cuota.trabajador + ret), especie: t.map_or(0.0, |t| t.especie) })
-        }
-        _ => None,
-    };
 
     let mut notas = Vec::new();
     if anio.conjunta {
@@ -704,7 +679,7 @@ pub fn detalle(d: &Datos, y: i32) -> Detalle {
         notas.push(format!("No hay datos de {y}."));
     }
 
-    Detalle { anio, ganado, irpf, cuota, nomina: n, cuna, notas }
+    Detalle { anio, ganado, irpf, cuota, nomina: n, notas }
 }
 
 /// Las cifras de un año (para la serie).

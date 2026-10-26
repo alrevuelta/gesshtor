@@ -1,9 +1,10 @@
 //! «Inicio»: el saludo, tu certificado (y cuándo caduca), qué eres ahora (por cuenta ajena, por tu cuenta o las
-//! dos cosas), tu última nómina, tu alta, actividad y cuota de autónomo, lo último presentado y el próximo plazo.
+//! dos cosas), tu última nómina, tu alta, actividad y cuota de autónomo, lo último presentado y el próximo plazo. Abajo,
+//! en el borde, la carpeta de tus datos y la versión de la app (con su commit).
 use crate::dominio::fmt::{eur, fecha_corta};
 use crate::dominio::fmt::nombre_mes;
 use crate::informe::inicio::{inicio, Inicio as Datos};
-use crate::tui::texto::{cuando, frase};
+use crate::tui::texto::{cuando, frase, ruta_corta};
 use crate::tui::widgets::{bloque, tema};
 use crate::tui::{Ctx, Pantalla};
 use ratatui::crossterm::event::KeyEvent;
@@ -34,6 +35,22 @@ fn plazo_en_dias(dias: i64) -> String {
         format!("{n} días")
     };
     if dias < 0 { format!("hace {txt}") } else { format!("dentro de {txt}") }
+}
+
+/// Lo del borde de abajo en `ancho` columnas: « Tus datos: ~/Impuestos/ana » y « gesshtor 0.1.0 · 1a2b3c ». Si no
+/// cabe, la ruta se corta por delante (lo último es la carpeta de la persona) y, si ni así, sin la versión.
+fn borde(ruta: &str, version: &str, ancho: usize) -> (String, Option<String>) {
+    let version = format!(" gesshtor {version} ");
+    let n = |s: &str| s.chars().count();
+    let con_version = ancho.saturating_sub(4 + n(&version));
+    let (libre, version) = if con_version >= 30 { (con_version, Some(version)) } else { (ancho.saturating_sub(4), None) };
+    let entera = format!(" Tus datos: {ruta} ");
+    if n(&entera) <= libre {
+        return (entera, version);
+    }
+    let cabe = libre.saturating_sub(n(" Tus datos: … "));
+    let cola: String = ruta.chars().skip(n(ruta).saturating_sub(cabe)).collect();
+    (format!(" Tus datos: …{cola} "), version)
 }
 
 fn lineas(i: &Datos, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -174,7 +191,13 @@ impl Pantalla for Inicio {
             self.i = inicio(&ctx.datos, ctx.certificado.as_deref());
             self.clave = Some(clave);
         }
-        f.render_widget(Paragraph::new(lineas(&self.i, ctx)).wrap(Wrap { trim: false }).block(bloque("Inicio")), area);
+        // En el borde de abajo, siempre a la vista: dónde están tus datos y qué versión es.
+        let (datos, version) = borde(&ruta_corta(&ctx.dir), crate::VERSION, area.width as usize);
+        let mut b = bloque("Inicio").title_bottom(Line::styled(datos, tema::apagado()));
+        if let Some(v) = version {
+            b = b.title_bottom(Line::styled(v, tema::apagado()).right_aligned());
+        }
+        f.render_widget(Paragraph::new(lineas(&self.i, ctx)).wrap(Wrap { trim: false }).block(b), area);
     }
 
     fn tecla(&mut self, _k: KeyEvent, _ctx: &mut Ctx) -> bool {
@@ -183,5 +206,23 @@ impl Pantalla for Inicio {
 
     fn atajos(&self) -> Vec<(&'static str, &'static str)> {
         vec![("S", "traer lo último"), ("Tab", "más")]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_borde_de_abajo() {
+        let (d, v) = borde("~/Impuestos/ana", "0.1.0 · 1a2b3c4d5e6f", 100);
+        assert_eq!((d.as_str(), v.as_deref()), (" Tus datos: ~/Impuestos/ana ", Some(" gesshtor 0.1.0 · 1a2b3c4d5e6f ")));
+        // Si no cabe, se ve el final de la ruta: la carpeta de la persona.
+        let (d, v) = borde("~/Documentos/mis papeles/Impuestos/ana-perez", "0.1.0 · 1a2b3c4d5e6f", 70);
+        assert!(d.ends_with("Impuestos/ana-perez ") && d.contains('…') && v.is_some(), "{d}");
+        assert!(d.chars().count() + v.unwrap().chars().count() <= 70 - 4);
+        // Muy estrecho: solo la ruta.
+        let (d, v) = borde("~/Impuestos/ana-perez", "0.1.0 · 1a2b3c4d5e6f", 40);
+        assert!(v.is_none() && d.ends_with("ana-perez ") && d.chars().count() <= 36, "{d}");
     }
 }
