@@ -107,7 +107,8 @@ impl Vista {
         let (a, t) = (&self.d.anio, &self.rep.total);
         let n = if self.prevision.is_some() { 4 } else { 3 };
         let zonas = Layout::horizontal(vec![Constraint::Ratio(1, n); n as usize]).split(area);
-        let w = zonas[0].width.saturating_sub(2) as usize;
+        // Lo que cabe en el borde (la etiqueta, con un espacio a cada lado) y dentro (con un margen).
+        let w = zonas[0].width.saturating_sub(4) as usize;
         let cabe = |largo: String, corto: &str| if largo.chars().count() <= w { largo } else { corto.to_string() };
         let generado = fmt::r2(t.generado - t.iva);
         let nota_generado = if a.sueldo_aprox {

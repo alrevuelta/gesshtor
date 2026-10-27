@@ -19,9 +19,6 @@ pub struct Inicio {
     pub ultimo_presentado: Option<(Vec<String>, String, i32, String)>,
     /// El próximo plazo trimestral sin presentar: («4T 2026», desde, hasta).
     pub proximo_plazo: Option<(String, String, String)>,
-    /// Cuándo se consultó por última vez Hacienda y la Seguridad Social.
-    pub consultado_hacienda: Option<String>,
-    pub consultado_ss: Option<String>,
 }
 
 /// La última nómina que tiene la Seguridad Social.
@@ -116,8 +113,6 @@ pub fn inicio(d: &Datos, cert: Option<&Certificado>) -> Inicio {
             .map(|p| (format!("{}T {}", p.q, p.anio), p.ini, p.fin))
             .next();
     }
-    o.consultado_hacienda = d.hacienda.values().map(|h| h.fecha.clone()).filter(|f| !f.is_empty()).max();
-    o.consultado_ss = (!d.tgss.consultado.is_empty()).then(|| d.tgss.consultado.clone());
     o
 }
 

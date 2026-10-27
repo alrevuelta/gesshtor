@@ -39,22 +39,22 @@ fn queda(x: f64) -> Style {
 }
 
 /// «1.234,56 €», «−2.746,00 €»
-fn importe(x: f64) -> String {
+pub(super) fn importe(x: f64) -> String {
     if x < -DIF { format!("−{}", eur(-x)) } else { eur(x) }
 }
 
-/// Los pasos de un bloque: «etiqueta   importe», juntos (no a todo el ancho).
-struct Pasos {
+/// Los pasos de un bloque: «etiqueta   importe», juntos (no a todo el ancho). También para la calculadora.
+pub(super) struct Pasos {
     et_w: usize,
-    lineas: Vec<Line<'static>>,
+    pub(super) lineas: Vec<Line<'static>>,
 }
 
 impl Pasos {
-    fn new(w: usize) -> Pasos {
+    pub(super) fn new(w: usize) -> Pasos {
         Pasos { et_w: w.min(76).saturating_sub(COL + 1).max(12), lineas: Vec::new() }
     }
 
-    fn paso(&mut self, et: &str, st: Style, x: f64, signo: &str) {
+    pub(super) fn paso(&mut self, et: &str, st: Style, x: f64, signo: &str) {
         let mut et: String = et.chars().take(self.et_w).collect();
         let n = et.chars().count();
         et.extend(std::iter::repeat_n(' ', self.et_w - n));
@@ -63,11 +63,11 @@ impl Pasos {
     }
 
     /// Un paso de detalle, en gris y más adentro.
-    fn detalle(&mut self, et: &str, x: f64) {
+    pub(super) fn detalle(&mut self, et: &str, x: f64) {
         self.paso(&format!("      {et}"), gris(), x, "");
     }
 
-    fn nota(&mut self, t: String, w: usize) {
+    pub(super) fn nota(&mut self, t: String, w: usize) {
         self.lineas.extend(envolver(&[(t, gris())], w, 4));
     }
 }

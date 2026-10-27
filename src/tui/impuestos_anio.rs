@@ -378,7 +378,7 @@ fn pintar_kpis(f: &mut Frame, area: Rect, vista: &Vista, grande: bool) {
     let por_columna = if grande { 18 } else { 14 };
     let n = (area.width / por_columna).clamp(1, 6) as usize;
     let ancho = area.width as usize / n;
-    let e = |x: f64| if ancho >= 16 { fmt::eur(x) } else { fmt::eur0(x) };
+    let e = |x: f64| if ancho >= 14 { fmt::eur(x) } else { fmt::eur0(x) };
     let todos = match vista {
         Vista::App(c) => kpis_app(c, &e),
         Vista::Renta(r) => kpis_renta(r, &e),
@@ -386,7 +386,8 @@ fn pintar_kpis(f: &mut Frame, area: Rect, vista: &Vista, grande: bool) {
     let elegidos: Vec<_> = todos.iter().filter(|k| k.0 < n).collect();
     let zonas = Layout::horizontal(vec![Constraint::Ratio(1, elegidos.len() as u32); elegidos.len()]).split(area);
     for (k, zona) in elegidos.iter().zip(zonas.iter()) {
-        let etiqueta = if zona.width >= 20 { k.1 } else { k.2 };
+        // La etiqueta va en el borde, con un espacio a cada lado.
+        let etiqueta = if zona.width as usize >= k.1.chars().count() + 4 { k.1 } else { k.2 };
         if grande {
             kpi(f, *zona, etiqueta, &k.3, &k.4, k.5);
         } else {
@@ -711,7 +712,7 @@ impl Anio {
         let hoy = &c.clave.2;
         let av = &c.avisos;
         // Con poca altura, las cifras van en dos líneas sin recuadro.
-        let grande = area.height >= 30;
+        let grande = area.height >= 27;
         let ancho = area.width.saturating_sub(2);
         let n_av = if av.is_empty() { alto_aviso(&al_dia(hoy), ancho) } else { av.iter().map(|a| alto_aviso(&a.texto, ancho)).sum::<u16>() };
         let n_av = n_av.min(if grande { 6 } else { 3 });

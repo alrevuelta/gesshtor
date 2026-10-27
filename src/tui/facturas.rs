@@ -676,13 +676,14 @@ impl Facturas {
             cols.push(Col::Fecha);
         }
         cols.push(Col::Cliente);
-        if w >= 75 {
+        // Lo que cabe, dejando al cliente al menos unos 13 caracteres.
+        if w >= 72 {
             cols.push(Col::Base);
         }
-        if w >= 88 {
+        if w >= 85 {
             cols.push(Col::Iva);
         }
-        if w >= 100 {
+        if w >= 97 {
             cols.push(Col::Retencion);
         }
         cols.extend([Col::Total, Col::Estado, Col::Doc]);

@@ -29,6 +29,7 @@ pub mod menu;
 #[cfg(test)]
 pub mod prueba;
 pub mod texto;
+pub mod utilidades;
 pub mod widgets;
 
 use crate::dominio::Datos;
@@ -37,7 +38,7 @@ use crate::hacienda::lectura;
 use crate::informe;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
@@ -69,8 +70,8 @@ pub struct Ctx {
     pub ir_a: Option<&'static str>,
     /// Una pantalla pide elegir uno de los PDF de un año (no tiene uno concreto que abrir).
     pub pdfs_de: Option<i32>,
-    /// El certificado digital, si se arrancó con `--certificado` (para traer lo último de Hacienda y la
-    /// Seguridad Social).
+    /// Tu certificado digital (para traer lo último de Hacienda y la Seguridad Social). La app no se abre sin él;
+    /// solo en las pruebas falta.
     pub certificado: Option<Arc<crate::red::certificado::Certificado>>,
     /// Mientras se trae lo último: por dónde va.
     pub sincronizando: Option<String>,
@@ -176,13 +177,22 @@ pub trait Pantalla {
     fn usa_anio(&self) -> bool {
         true
     }
+    /// Su tecla en el menú, si es una letra (las utilidades: «C»). Las demás llevan un número, por orden.
+    fn tecla_menu(&self) -> Option<char> {
+        None
+    }
 }
 
 /// Desde este ancho, el menú va a la izquierda; más estrecho, arriba.
 const ANCHO_MENU: u16 = 100;
 /// Ancho del menú de la izquierda.
-const MENU: u16 = 20;
-/// Desde esta altura, el año de arriba va en números grandes (tres líneas, y una de margen); más bajo, en una.
+const MENU: u16 = 26;
+/// «GESSHTOR» en letras de tres filas: cada una de 4 × 5 puntos y un punto de separación, con cuartos de bloque (dos
+/// puntos por celda a lo ancho y a lo alto). Las columnas 0–4 son «GE»; la 5–11, «SSH»; y de la 12, «TOR».
+const MARCA: [&str; 3] = ["▞▀▐▀▘▞▀▗▀▘▌▐▝█▘▞▚▐▀▖", "▌▜▐▀ ▝▚ ▀▖▛▜ █ ▌▐▐▜ ", "▝▀▝▀▘▀▘▝▀ ▘▝ ▀ ▝▘▝ ▘"];
+
+/// Desde esta altura, la franja de arriba (con la marca y el año en grande) ocupa cinco líneas: una de margen, tres
+/// y la línea de debajo; más bajo, una y la línea.
 const ALTO_ANIO_GRANDE: u16 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +200,7 @@ pub enum Area {
     Resumen,
     Empleo,
     Autonomo,
+    Utilidades,
 }
 
 /// Una sección del menú de arriba, con sus pestañas.
@@ -217,9 +228,6 @@ pub struct App {
     pub activa: usize,
     pub salir: bool,
     pub ayuda: bool,
-    /// Las personas de la carpeta (si hay más de una se puede cambiar con «p»).
-    pub perfiles: Vec<PathBuf>,
-    elegir: Option<Selector>,
     /// La lista de PDF de un año para abrir uno (con «o»).
     elegir_pdf: Option<Selector>,
     lectura: Option<Receiver<Mensaje>>,
@@ -228,7 +236,7 @@ pub struct App {
 
 impl App {
     pub fn new(ctx: Ctx) -> Self {
-        let mut app = App { ctx, secciones: menu::secciones(), activa: 0, salir: false, ayuda: false, perfiles: Vec::new(), elegir: None, elegir_pdf: None, lectura: None, red: None };
+        let mut app = App { ctx, secciones: menu::secciones(), activa: 0, salir: false, ayuda: false, elegir_pdf: None, lectura: None, red: None };
         app.entrar();
         app
     }
@@ -241,6 +249,7 @@ impl App {
                 Area::Resumen => true,
                 Area::Empleo => s.empleo,
                 Area::Autonomo => s.autonomo,
+                Area::Utilidades => true,
             })
             .collect()
     }
@@ -277,12 +286,38 @@ impl App {
         self.visibles().into_iter().flat_map(|i| (0..self.secciones[i].pantallas.len()).map(move |j| (i, j))).collect()
     }
 
-    /// Va a la entrada `n` del menú (0, la primera).
-    fn ir_entrada(&mut self, n: usize) {
-        if let Some(&(i, j)) = self.entradas().get(n) {
-            self.activa = i;
-            self.secciones[i].activa = j;
-            self.entrar();
+    /// La tecla de cada entrada del menú, en el orden de `entradas`: las de datos, 1–9 y 0 (más allá, ninguna; se
+    /// llega con Tab); las utilidades, su letra (no cambia según las secciones que tengas).
+    fn teclas(&self) -> Vec<String> {
+        let mut n = 0;
+        self.entradas()
+            .into_iter()
+            .map(|(i, j)| match self.secciones[i].pantallas[j].tecla_menu() {
+                Some(c) => c.to_string(),
+                None => {
+                    n += 1;
+                    match n {
+                        1..=9 => n.to_string(),
+                        10 => "0".into(),
+                        _ => String::new(),
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Va a la entrada del menú con esa tecla. Devuelve false si no hay ninguna.
+    fn ir_tecla(&mut self, c: char) -> bool {
+        let t = c.to_string();
+        match self.teclas().iter().position(|x| *x == t) {
+            Some(n) => {
+                let (i, j) = self.entradas()[n];
+                self.activa = i;
+                self.secciones[i].activa = j;
+                self.entrar();
+                true
+            }
+            None => false,
         }
     }
 
@@ -319,7 +354,7 @@ impl App {
     /// `todo`, también los años ya consultados.
     pub fn sincronizar(&mut self, todo: bool) {
         let Some(cert) = self.ctx.certificado.clone() else {
-            self.ctx.error("Para traer lo último hace falta tu certificado: arranca con --certificado <ruta del .p12>.");
+            self.ctx.error("No hay ningún certificado abierto.");
             return;
         };
         if self.red.is_some() {
@@ -402,25 +437,6 @@ impl App {
         cambio
     }
 
-    /// Cambia a la carpeta de otra persona.
-    fn cambiar_perfil(&mut self, dir: &Path) {
-        if dir == self.ctx.dir {
-            return;
-        }
-        match Ctx::abrir(dir) {
-            Ok(mut ctx) => {
-                ctx.anio = self.ctx.anio;
-                let perfiles = std::mem::take(&mut self.perfiles);
-                *self = App::new(ctx);
-                self.perfiles = perfiles;
-                self.leer_en_segundo_plano();
-                let quien = nombre_de(&self.ctx.datos);
-                self.ctx.ok(format!("Ahora ves los datos de {quien}."));
-            }
-            Err(e) => self.ctx.error(format!("No se puede abrir {}: {e}", dir.display())),
-        }
-    }
-
     pub fn tecla(&mut self, k: KeyEvent) {
         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
             self.salir = true;
@@ -437,17 +453,6 @@ impl App {
                     self.ctx.abrir_ruta(&PathBuf::from(r));
                 }
                 Eleccion::Cancelado => self.elegir_pdf = None,
-                Eleccion::Sigue => {}
-            }
-            return;
-        }
-        if let Some(sel) = &mut self.elegir {
-            match sel.tecla(k) {
-                Eleccion::Elegido(r) => {
-                    self.elegir = None;
-                    self.cambiar_perfil(&PathBuf::from(r));
-                }
-                Eleccion::Cancelado => self.elegir = None,
                 Eleccion::Sigue => {}
             }
             return;
@@ -474,38 +479,33 @@ impl App {
             // Las pantallas sin un PDF propio: los del año.
             KeyCode::Char('o') if con_anio => self.lista_pdfs(self.ctx.anio),
             // Cada entrada del menú, con el número que lleva al lado (1–9 y 0, la décima).
-            KeyCode::Char(c @ '1'..='9') => self.ir_entrada(c as usize - '1' as usize),
-            KeyCode::Char('0') => self.ir_entrada(9),
+            // Cada entrada del menú, con la tecla que lleva al lado (1–9 y 0; las utilidades, su letra).
+            KeyCode::Char(c) if self.ir_tecla(c) => {}
             KeyCode::Tab => self.mover_pestana(1),
             KeyCode::BackTab => self.mover_pestana(-1),
             KeyCode::Char('-' | '_' | '[') if con_anio => self.cambiar_anio(-1),
             KeyCode::Char('+' | '=' | ']') if con_anio => self.cambiar_anio(1),
-            KeyCode::Char('p') if self.perfiles.len() > 1 => {
-                let v = self.perfiles.iter().map(|p| (p.to_string_lossy().to_string(), p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), String::new())).collect();
-                self.elegir = Some(Selector::new("Ver los datos de…", v).con_elegido(&self.ctx.dir.to_string_lossy()));
-            }
             _ => {}
         }
     }
 
     pub fn dibujar(&mut self, f: &mut Frame) {
         let [arriba, pie] = Layout::vertical([Constraint::Min(5), Constraint::Length(2)]).areas(f.area());
+        // Arriba, de lado a lado, la franja: la marca, dónde estás, el año y quién eres, con una línea debajo (y una
+        // fila de aire). Con la terminal estrecha, encima va el menú, en dos líneas.
+        let (franja, aire) = if f.area().height >= ALTO_ANIO_GRANDE { (5, 1) } else { (2, 0) };
         let cuerpo = if f.area().width >= ANCHO_MENU {
-            let [menu, cuerpo] = Layout::horizontal([Constraint::Length(MENU), Constraint::Min(10)]).areas(arriba);
+            let [a_franja, _, abajo] = Layout::vertical([Constraint::Length(franja), Constraint::Length(aire), Constraint::Min(0)]).areas(arriba);
+            self.franja(f, a_franja, true);
+            let [menu, cuerpo] = Layout::horizontal([Constraint::Length(MENU), Constraint::Min(10)]).areas(abajo);
             self.menu(f, menu);
             cuerpo
         } else {
-            let [cab, cuerpo] = Layout::vertical([Constraint::Length(2), Constraint::Min(3)]).areas(arriba);
+            // Con poca altura, sin la línea: cada fila cuenta.
+            let franja = if franja < 5 { 1 } else { franja };
+            let [cab, a_franja, _, cuerpo] = Layout::vertical([Constraint::Length(2), Constraint::Length(franja), Constraint::Length(aire), Constraint::Min(3)]).areas(arriba);
             self.cabecera(f, cab);
-            cuerpo
-        };
-        // Arriba, en el centro, el año que se ve (si la pantalla depende de él).
-        let cuerpo = if self.pantalla().usa_anio() {
-            let alto = if f.area().height >= ALTO_ANIO_GRANDE { 4 } else { 1 };
-            let [barra, resto] = Layout::vertical([Constraint::Length(alto), Constraint::Min(0)]).areas(cuerpo);
-            self.barra_anio(f, barra);
-            resto
-        } else {
+            self.franja(f, a_franja, false);
             cuerpo
         };
         let s = &mut self.secciones[self.activa];
@@ -514,12 +514,10 @@ impl App {
         if self.ayuda {
             self.dibujar_ayuda(f);
         }
-        if let Some(sel) = &mut self.elegir {
-            sel.dibujar(f, f.area());
-        }
         if let Some(sel) = &mut self.elegir_pdf {
             sel.dibujar(f, f.area());
         }
+        widgets::uniformar_seleccion(f.buffer_mut());
     }
 
     /// Los PDF de Hacienda de un año: si hay uno, lo abre; si hay varios, deja elegir.
@@ -539,65 +537,185 @@ impl App {
         }
     }
 
-    /// El menú de la izquierda: quién y las secciones con sus entradas.
+    /// Cómo va lo de traer lo último de Hacienda y la Seguridad Social: (glifo y su estilo, texto, hora, tecla S
+    /// resaltada, qué hace la S). La hora: «22:10», «ayer 22:10» o «24 oct».
+    fn estado(&self) -> ((&'static str, Style), (String, Style), String, bool, &'static str) {
+        let hora = |c: &str| {
+            let (dia, h) = (c.get(..10).unwrap_or_default(), c.get(11..16).unwrap_or_default());
+            match fmt::dias_entre(dia, &fmt::hoy()) {
+                0 => h.to_string(),
+                1 => format!("ayer {h}"),
+                _ => fmt::fecha_corta(dia).rsplit_once(' ').map_or(dia.to_string(), |(dm, _)| dm.to_string()),
+            }
+        };
+        let normal = Style::new();
+        match (&self.ctx.sincronizando, &self.ctx.sincronizado) {
+            (Some(p), _) => (("●", Style::new().fg(tema::ACENTO)), ("Actualizando…".into(), Style::new().fg(tema::ACENTO)), p.clone(), false, ""),
+            (None, Some((c, _, errores))) if !errores.is_empty() => (("●", Style::new().fg(tema::AVISO)), ("Con errores".into(), Style::new().fg(tema::AVISO)), hora(c), true, "Reintentar"),
+            (None, Some((c, _, _))) => (("●", Style::new().fg(tema::BIEN)), ("Al día".into(), normal), hora(c), false, "Actualizar"),
+            (None, None) => (("○", tema::apagado()), ("Sin actualizar".into(), normal), String::new(), true, "Actualizar"),
+        }
+    }
+
+    /// El menú de la izquierda: cada sección con sus entradas, cada una con su tecla; y abajo, cómo va lo de traer lo
+    /// último y la versión. La marca va encima, en la franja. Todo sobre una rejilla: la marca de la elegida en la
+    /// columna 0, las teclas y la marca de arriba en la 2, los textos en la 5, y lo de la derecha acaba en la
+    /// penúltima; la última queda en blanco, de calle hasta el contenido. Sin fondos: solo el color de acento.
     fn menu(&self, f: &mut Frame, area: Rect) {
+        let gris = tema::apagado();
+        let acento = Style::new().fg(tema::ACENTO);
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
         let w = area.width.saturating_sub(1) as usize;
         let corta = |s: &str, n: usize| if s.chars().count() > n { s.chars().take(n.saturating_sub(1)).collect::<String>() + "…" } else { s.to_string() };
-        let mut v = vec![
-            Line::styled(format!(" {}", corta(&nombre_de(&self.ctx.datos), w - 1)), Style::new().fg(tema::ACENTO).add_modifier(Modifier::BOLD)),
-        ];
+        let mut v: Vec<Line> = Vec::new();
+        let teclas = self.teclas();
         let mut n = 0;
-        for &i in &self.visibles() {
+        for (k, &i) in self.visibles().iter().enumerate() {
             let s = &self.secciones[i];
-            v.push(Line::from(""));
-            v.push(Line::styled(format!(" {}", s.nombre), Style::new().add_modifier(Modifier::BOLD)));
+            // La primera, a la altura del contenido.
+            if k > 0 {
+                v.push(Line::from(""));
+            }
+            v.push(Line::styled(format!("  {}", s.nombre.to_uppercase()), gris));
             for (j, p) in s.pantallas.iter().enumerate() {
-                // Su número (la tecla que lleva allí) y el título.
                 let t = corta(p.titulo(), w - 5);
-                let activa = i == self.activa && j == s.activa;
-                let st = if activa { tema::pestana_activa() } else { tema::apagado() };
-                let marca = if activa { " ›" } else { "  " };
-                v.push(Line::from(vec![Span::styled(marca, st), Span::styled(format!("{:>2} ", tecla_entrada(n)), if activa { st } else { Style::new().fg(tema::ACENTO) }), Span::styled(format!("{t:<ancho$}", ancho = w - 5), st)]));
+                let tecla = teclas.get(n).cloned().unwrap_or_default();
                 n += 1;
+                v.push(if i == self.activa && j == s.activa {
+                    Line::from(vec![Span::styled("▌", acento), Span::styled(format!(" {tecla:<2} {t}"), negrita.fg(tema::ACENTO))])
+                } else {
+                    Line::from(vec![Span::styled(format!("  {tecla:<2} "), gris), Span::raw(t)])
+                });
             }
         }
-        let borde = ratatui::widgets::Block::new().borders(ratatui::widgets::Borders::RIGHT).border_style(tema::apagado());
-        f.render_widget(Paragraph::new(v).block(borde), area);
+        let alto = v.len() as u16;
+        f.render_widget(Paragraph::new(v), Rect { width: w as u16, ..area });
+        // Abajo, si cabe: cómo va lo de traer lo último y la versión (y una fila de aire hasta la barra de abajo).
+        if area.height < alto + 4 {
+            return;
+        }
+        let ((glifo, st_glifo), (que, st_que), hora, resaltar, accion) = self.estado();
+        let r1 = Rect { y: area.bottom() - 3, height: 1, width: w as u16, ..area };
+        let r2 = Rect { y: r1.y + 1, ..r1 };
+        let mut l1 = vec![Span::raw("  "), Span::styled(glifo, st_glifo), Span::raw("  "), Span::styled(que, st_que)];
+        let version = format!("v{}", crate::VERSION.split(' ').next().unwrap_or_default());
+        if self.ctx.sincronizando.is_some() {
+            // Por dónde va, en la segunda línea.
+            f.render_widget(Paragraph::new(Line::from(l1)), r1);
+            f.render_widget(Paragraph::new(Line::styled(format!("     {}", corta(&hora, w.saturating_sub(5))), gris)), r2);
+            return;
+        }
+        if !hora.is_empty() {
+            l1.push(Span::styled(format!(" · {hora}"), gris));
+        }
+        f.render_widget(Paragraph::new(Line::from(l1)), r1);
+        let (st_s, st_t) = if resaltar { (negrita.fg(tema::ACENTO), Style::new()) } else { (gris, gris) };
+        f.render_widget(Paragraph::new(Line::from(vec![Span::raw("  "), Span::styled("S", st_s), Span::styled(format!("  {accion}"), st_t)])), r2);
+        f.render_widget(Paragraph::new(Line::styled(version, gris).right_aligned()), r2);
     }
 
-    /// El año, centrado; con sitio, en grande (tres líneas) y con una de margen encima.
-    fn barra_anio(&self, f: &mut Frame, area: Rect) {
-        let y = self.ctx.anio;
-        let st = Style::new().fg(tema::ACENTO).add_modifier(Modifier::BOLD);
-        let lineas: Vec<Line> = if area.height < 4 {
-            vec![Line::styled(y.to_string(), st)]
-        } else {
-            std::iter::once(Line::from("")).chain(en_grande(y).into_iter().map(|l| Line::styled(l, st))).collect()
-        };
-        f.render_widget(Paragraph::new(lineas).centered(), area);
+    /// La franja de arriba, de lado a lado, con todo en la misma fila (la del medio): encima del menú, la marca
+    /// («GESSHTOR» en grande); encima del contenido y alineado con él, dónde estás («Autónomo ›
+    /// Facturas»); en el centro del contenido, el año que ves, en grande (si la pantalla depende de él); y a la
+    /// derecha, quién eres (tus iniciales y tu nombre). Debajo, una línea. Con poca altura, todo en una fila.
+    fn franja(&self, f: &mut Frame, area: Rect, con_marca: bool) {
+        let gris = tema::apagado();
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
+        let grande = area.height >= 5;
+        let filas = if grande { Rect { y: area.y + 1, height: 3, ..area } } else { Rect { height: 1, ..area } };
+        let fila = Rect { y: if grande { filas.y + 1 } else { filas.y }, height: 1, ..area };
+        // En degradado, como el año: más claro arriba.
+        let tonos = [Color::LightCyan, tema::ACENTO, Color::Blue];
+        let izq = if con_marca { MENU.min(area.width) } else { 0 };
+        if con_marca {
+            // El logo es el nombre: «GESSHTOR» en letras de tres filas (de 4 × 5 puntos, con cuartos de bloque), con
+            // «SSH» (gestor con ssh dentro) en el degradado del año.
+            if grande {
+                let logo: Vec<Line> = MARCA
+                    .into_iter()
+                    .zip(tonos)
+                    .map(|(l, c)| {
+                        let t: Vec<char> = l.chars().collect();
+                        let trozo = |a: usize, b: usize| t[a..b].iter().collect::<String>();
+                        Line::from(vec![Span::styled(trozo(0, 5), negrita), Span::styled(trozo(5, 12), negrita.fg(c)), Span::styled(trozo(12, t.len()), negrita)])
+                    })
+                    .collect();
+                f.render_widget(Paragraph::new(logo), Rect { x: area.x + 2, width: izq.saturating_sub(2), ..filas });
+            } else {
+                let l = vec![Span::styled("  GE", negrita), Span::styled("SSH", negrita.fg(tema::ACENTO)), Span::styled("TOR", negrita)];
+                f.render_widget(Paragraph::new(Line::from(l)), Rect { width: izq, ..fila });
+            }
+        }
+        let zona = Rect { x: area.x + izq, width: area.width.saturating_sub(izq), ..area };
+        // Dónde estás.
+        let seccion = self.secciones[self.activa].nombre;
+        let titulo = self.pantalla().titulo();
+        let antes = if con_marca { "" } else { " " };
+        let donde = Line::from(vec![Span::styled(format!("{antes}{seccion} › "), gris), Span::styled(titulo, negrita)]);
+        f.render_widget(Paragraph::new(donde), Rect { y: fila.y, height: 1, ..zona });
+        // Quién: las iniciales en un círculo del color de acento y el nombre, recortado para no pisar el año.
+        let nombre = nombre_de(&self.ctx.datos);
+        let ini = iniciales(&nombre);
+        let sitio = (zona.width as usize).saturating_sub(17) / 2;
+        let libre = sitio.saturating_sub(ini.chars().count() + 5);
+        let mut quien = vec![Span::styled("▐", Style::new().fg(tema::ACENTO)), Span::styled(format!(" {ini} "), tema::pestana_activa()), Span::styled("▌", Style::new().fg(tema::ACENTO))];
+        if libre >= 4 {
+            let n: String = if nombre.chars().count() > libre { nombre.chars().take(libre - 1).chain(['…']).collect() } else { nombre.clone() };
+            quien.push(Span::styled(format!(" {n}"), negrita));
+        }
+        quien.push(Span::raw(" "));
+        f.render_widget(Paragraph::new(Line::from(quien).right_aligned()), Rect { y: fila.y, height: 1, ..zona });
+        // El año, en el centro del contenido.
+        if self.pantalla().usa_anio() {
+            let st = negrita.fg(tema::ACENTO);
+            if grande {
+                let g: Vec<Line> = en_grande(self.ctx.anio).into_iter().zip(tonos).map(|(l, c)| Line::styled(l, st.fg(c))).collect();
+                f.render_widget(Paragraph::new(g).centered(), Rect { y: filas.y, height: 3, ..zona });
+            } else {
+                f.render_widget(Paragraph::new(Line::styled(format!(" {} ", self.ctx.anio), st).centered()), Rect { y: fila.y, height: 1, ..zona });
+            }
+        }
+        // Y la línea de debajo.
+        if area.height >= 2 {
+            let y = area.bottom() - 1;
+            f.render_widget(Paragraph::new(Line::styled("─".repeat(area.width as usize), gris)), Rect { y, height: 1, ..area });
+        }
     }
 
+    /// Con la terminal estrecha, el menú va arriba, en dos líneas: la marca, las secciones y cómo va lo de traer lo
+    /// último; y debajo, las entradas de la sección elegida, cada una con su tecla.
     fn cabecera(&self, f: &mut Frame, area: Rect) {
         let [l1, l2] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-        // Línea 1: quién y las secciones, cada una con el número de su primera entrada.
-        let entradas = self.entradas();
-        let mut v = vec![Span::styled(format!(" {} ", nombre_de(&self.ctx.datos)), Style::new().fg(tema::ACENTO).add_modifier(Modifier::BOLD)), Span::raw("  ")];
+        let gris = tema::apagado();
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
+        let mut v = vec![Span::raw(" "), Span::styled(" gesshtor ", tema::pestana_activa()), Span::raw("   ")];
         for &i in &self.visibles() {
-            let n = entradas.iter().position(|e| e.0 == i).unwrap_or(0);
-            let t = format!(" {} {} ", tecla_entrada(n), self.secciones[i].nombre);
-            v.push(if i == self.activa { Span::styled(t, tema::pestana_activa()) } else { Span::styled(t, tema::apagado()) });
-            v.push(Span::raw(" "));
+            let st = if i == self.activa { negrita } else { gris };
+            v.push(Span::styled(self.secciones[i].nombre.to_uppercase(), st));
+            v.push(Span::raw("   "));
         }
         f.render_widget(Paragraph::new(Line::from(v)), l1);
-        // Línea 2: las pestañas de la sección, con su número.
+        let ((glifo, st_glifo), (que, st_que), hora, _, _) = self.estado();
+        let mut der = vec![Span::styled(glifo, st_glifo), Span::raw(" "), Span::styled(que, st_que)];
+        if !hora.is_empty() && self.ctx.sincronizando.is_none() {
+            der.push(Span::styled(format!(" · {hora}"), gris));
+        }
+        der.push(Span::raw(" "));
+        f.render_widget(Paragraph::new(Line::from(der).right_aligned()), l1);
+        // Las entradas de la sección elegida, a la altura de las secciones.
+        let teclas = self.teclas();
+        let primera = self.entradas().iter().position(|e| e.0 == self.activa).unwrap_or(0);
         let s = &self.secciones[self.activa];
-        let primera = entradas.iter().position(|e| e.0 == self.activa).unwrap_or(0);
-        let mut v = vec![Span::raw("  ")];
-        for (i, p) in s.pantallas.iter().enumerate() {
-            let t = p.titulo();
-            v.push(Span::styled(format!("{} ", tecla_entrada(primera + i)), Style::new().fg(tema::ACENTO)));
-            v.push(if i == s.activa { Span::styled(t, Style::new().fg(tema::ACENTO).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)) } else { Span::styled(t, tema::apagado()) });
-            v.push(Span::styled("   ", tema::apagado()));
+        let mut v = vec![Span::raw(" ".repeat(14))];
+        for (j, p) in s.pantallas.iter().enumerate() {
+            let tecla = teclas.get(primera + j).cloned().unwrap_or_default();
+            if j == s.activa {
+                v.push(Span::styled(format!("{tecla} {}", p.titulo()), negrita.fg(tema::ACENTO)));
+            } else {
+                v.push(Span::styled(format!("{tecla} "), gris));
+                v.push(Span::raw(p.titulo()));
+            }
+            v.push(Span::raw("   "));
         }
         f.render_widget(Paragraph::new(Line::from(v)), l2);
     }
@@ -619,6 +737,10 @@ impl App {
             }
         let p = self.pantalla();
         let mut atajos = p.atajos();
+        // Con el menú a la izquierda, lo de traer lo último ya está abajo en él.
+        if area.width >= ANCHO_MENU {
+            atajos.retain(|(k, _)| *k != "S");
+        }
         if !p.capturando() {
             // Las de la app, si caben; si no, solo la ayuda y salir.
             let largo: usize = atajos.iter().map(|(k, d)| k.chars().count() + d.chars().count() + 4).sum();
@@ -639,7 +761,7 @@ impl App {
         let mut t = vec![
             Line::from("Teclas de la app".bold()),
             Line::from(""),
-            Line::from("1 … 9, 0          ir a la entrada del menú con ese número"),
+            Line::from("1 … 9, 0, C       ir a la entrada del menú con esa tecla (la de al lado)"),
             Line::from("Tab, Mayús+Tab    entrada siguiente / anterior del menú"),
             Line::from("- y +             año anterior / siguiente"),
             Line::from("↑ ↓, PgUp PgDn    moverse por las listas"),
@@ -648,12 +770,7 @@ impl App {
             Line::from("o                 abrir el PDF (el de lo que ves, o elegir uno del año)"),
             Line::from("/                 buscar"),
         ];
-        if self.perfiles.len() > 1 {
-            t.push(Line::from("p                 ver los datos de otra persona"));
-        }
-        if self.ctx.certificado.is_some() {
-            t.push(Line::from("S                 traer lo último de Hacienda y la Seguridad Social"));
-        }
+        t.push(Line::from("S                 traer lo último de Hacienda y la Seguridad Social"));
         t.extend([
             Line::from(""),
             Line::from("Los años pasados se ven con lo que dicen tus Rentas y la Seguridad Social;"),
@@ -702,12 +819,14 @@ fn en_grande(y: i32) -> [String; 3] {
     out
 }
 
-/// La tecla de la entrada `n` del menú (0, la primera): «1»…«9» y «0»; más allá, ninguna.
-fn tecla_entrada(n: usize) -> String {
-    match n {
-        0..=8 => (n + 1).to_string(),
-        9 => "0".into(),
-        _ => String::new(),
+/// «AP» de «Ana Pérez» (sin «de», «la»…); con una sola palabra, su primera letra.
+fn iniciales(nombre: &str) -> String {
+    let palabras: Vec<&str> = nombre.split_whitespace().filter(|p| !["de", "del", "la", "las", "los", "y"].contains(&p.to_lowercase().as_str())).collect();
+    let letra = |p: &&str| p.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    match palabras.as_slice() {
+        [] => String::new(),
+        [p] => letra(p),
+        [p, .., q] => letra(p) + &letra(q),
     }
 }
 

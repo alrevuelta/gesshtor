@@ -84,7 +84,8 @@ impl Cuotas {
         let n = k.cifras.len().max(1) as u32;
         let zonas = Layout::horizontal(vec![Constraint::Ratio(1, n); n as usize]).split(area);
         for (c, z) in k.cifras.iter().zip(zonas.iter()) {
-            let etiqueta = if z.width >= 22 { c.etiqueta.as_str() } else { c.corta.as_str() };
+            // La etiqueta va en el borde, con un espacio a cada lado.
+            let etiqueta = if z.width as usize >= c.etiqueta.chars().count() + 4 { c.etiqueta.as_str() } else { c.corta.as_str() };
             if grande {
                 kpi(f, *z, etiqueta, &c.valor, &c.nota, c.estilo);
             } else {

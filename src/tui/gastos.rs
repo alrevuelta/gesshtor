@@ -596,7 +596,7 @@ impl Gastos {
         // Columnas según el ancho: el concepto aparte si cabe; si no, el IVA es lo primero que sobra.
         let w = dentro.width;
         let partido = w >= 100;
-        let con_iva = w >= 74;
+        let con_iva = w >= 72;
         let con_base = w >= 64;
         let mut cab: Vec<Cell> = vec![Cell::from("Fecha"), Cell::from(""), Cell::from("Proveedor")];
         let mut anchos = vec![Constraint::Length(6), Constraint::Length(1), Constraint::Fill(1)];

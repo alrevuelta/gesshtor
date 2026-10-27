@@ -1,6 +1,6 @@
 //! Las secciones del menú y sus pestañas, en su orden.
 
-use super::{anios, clientes, cuotas, declaraciones, empleo, facturas, gastos, impuestos, inicio, Area, Seccion};
+use super::{anios, clientes, cuotas, declaraciones, empleo, facturas, gastos, impuestos, inicio, utilidades, Area, Seccion};
 
 pub fn secciones() -> Vec<Seccion> {
     let resumen: Vec<Box<dyn super::Pantalla>> = vec![
@@ -19,5 +19,6 @@ pub fn secciones() -> Vec<Seccion> {
         Seccion { area: Area::Resumen, nombre: "Resumen", pantallas: resumen, activa: 0 },
         Seccion { area: Area::Empleo, nombre: "Empleo", pantallas: empleo::pantallas(), activa: 0 },
         Seccion { area: Area::Autonomo, nombre: "Autónomo", pantallas: autonomo, activa: 0 },
+        Seccion { area: Area::Utilidades, nombre: "Utilidades", pantallas: vec![Box::new(utilidades::Calculadora::default())], activa: 0 },
     ]
 }

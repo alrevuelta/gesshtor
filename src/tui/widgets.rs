@@ -51,28 +51,50 @@ pub fn centrado(area: Rect, w: u16, h: u16) -> Rect {
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
-/// «n nueva · Enter ver · q salir»
+/// «n nueva  Enter ver  q salir», cada tecla como un botoncito.
 pub fn linea_atajos(atajos: &[(&str, &str)]) -> Line<'static> {
+    let tecla = Style::new().fg(Color::White).bg(tema::APAGADO).add_modifier(Modifier::BOLD);
     let mut v = vec![Span::raw(" ")];
     for (i, (k, d)) in atajos.iter().enumerate() {
         if i > 0 {
-            v.push(Span::styled(" · ", tema::apagado()));
+            v.push(Span::raw("  "));
         }
-        v.push(Span::styled(k.to_string(), Style::new().fg(tema::ACENTO).add_modifier(Modifier::BOLD)));
+        v.push(Span::styled(format!(" {k} "), tecla));
         v.push(Span::styled(format!(" {d}"), tema::apagado()));
     }
     Line::from(v)
 }
 
-/// Una cifra destacada: etiqueta arriba, valor grande, nota abajo.
+/// Una cifra destacada: la etiqueta en el borde de arriba y, dentro, el valor (en negrita) y una nota.
 pub fn kpi(f: &mut Frame, area: Rect, etiqueta: &str, valor: &str, nota: &str, estilo: Style) {
-    let b = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(tema::apagado());
-    let t = vec![
-        Line::styled(etiqueta.to_string(), tema::apagado()),
-        Line::styled(valor.to_string(), estilo.add_modifier(Modifier::BOLD)),
-        Line::styled(nota.to_string(), tema::apagado()),
-    ];
-    f.render_widget(Paragraph::new(t).block(b), area);
+    // La etiqueta, con un espacio a cada lado si cabe; si no, recortada.
+    let sitio = area.width.saturating_sub(2) as usize;
+    let n = etiqueta.chars().count();
+    let titulo = if n + 2 <= sitio {
+        format!(" {etiqueta} ")
+    } else if n <= sitio {
+        etiqueta.to_string()
+    } else {
+        etiqueta.chars().take(sitio.saturating_sub(1)).chain(['…']).collect()
+    };
+    let b = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(tema::apagado()).title(Span::styled(titulo, tema::apagado()));
+    let dentro = b.inner(area);
+    // Un espacio de margen a la izquierda, si cabe el valor.
+    let m = if (dentro.width as usize) > valor.chars().count() { " " } else { "" };
+    let t = vec![Line::styled(format!("{m}{valor}"), estilo.add_modifier(Modifier::BOLD)), Line::styled(format!("{m}{nota}"), tema::apagado())];
+    f.render_widget(b, area);
+    f.render_widget(Paragraph::new(t), dentro);
+}
+
+/// La fila elegida de una tabla (pintada con `tema::seleccion`, en vídeo inverso) como la entrada elegida del menú:
+/// una barra del color de acento, igual en todas sus celdas (si no, cada celda con su color se invierte distinta).
+pub fn uniformar_seleccion(buf: &mut ratatui::buffer::Buffer) {
+    let barra = tema::pestana_activa();
+    for c in buf.content.iter_mut() {
+        if c.modifier.contains(Modifier::REVERSED) {
+            c.set_style(Style::reset().patch(barra));
+        }
+    }
 }
 
 /// Texto alineado a la derecha (importes en tablas).

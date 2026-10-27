@@ -1,6 +1,7 @@
 //! Lo que enseñan las pantallas, calculado aparte (funciones puras: datos → cifras). Las pantallas solo pintan.
 pub mod anio;
 pub mod autonomo;
+pub mod calculadora;
 pub mod empleo;
 pub mod inicio;
 pub mod prevision;

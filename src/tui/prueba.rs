@@ -203,42 +203,56 @@ mod tests {
     /// Cada entrada del menú lleva su número al lado, y ese número va allí; escribiendo, es un número.
     #[test]
     fn un_numero_por_entrada() {
-        // Una autónoma sin nómina: Resumen (1–3) y Autónomo (4–8), sin Empleo.
+        // Una autónoma sin nómina: Resumen (1–3) y Autónomo (4–8), sin Empleo; y la calculadora, con la C.
         let mut a = app();
         teclas(&mut a, "4");
         assert_eq!(a.titulo_activa(), "Facturas");
         let p = pantalla(&mut a, 120, 36);
-        assert!(p.contains(" › 4 Facturas") && p.contains("   7 Impuestos"), "{p}");
+        assert!(p.contains("▌ 4  Facturas") && p.contains("  7  Impuestos") && p.contains("  C  Calcula tu sueldo"), "{p}");
         teclas(&mut a, "7");
         assert_eq!(a.titulo_activa(), "Impuestos");
         teclas(&mut a, "9");
         assert_eq!(a.titulo_activa(), "Impuestos", "no hay novena");
+        teclas(&mut a, "C");
+        assert_eq!(a.titulo_activa(), "Calcula tu sueldo", "las utilidades, con su letra");
         teclas(&mut a, "2");
         assert_eq!(a.titulo_activa(), "Años");
-        // Con el menú arriba: cada sección con el número de su primera entrada, y sus pestañas con el suyo.
+        // Con el menú arriba: las secciones y, debajo, las entradas de la elegida con su tecla.
         let p = pantalla(&mut a, 80, 24);
-        assert!(p.contains("4 Autónomo") && p.contains("2 Años"), "{p}");
+        assert!(p.contains("RESUMEN") && p.contains("2 Años") && p.contains("3 Declaraciones"), "{p}");
         // Buscando, los números se escriben.
         teclas(&mut a, "4/1");
         assert_eq!(a.titulo_activa(), "Facturas");
         assert!(a.pantalla().capturando());
-        // Caben todas: con las tres secciones son 10 (1–9 y 0).
-        assert!(titulos(&a).len() <= 10, "{:?}", titulos(&a));
+        // Las de datos caben en 1–9 y 0 aunque se tengan todas las secciones; las utilidades van aparte.
+        let datos = a.secciones.iter().filter(|s| s.area != super::super::Area::Utilidades).map(|s| s.pantallas.len()).sum::<usize>();
+        assert!(datos <= 10, "{:?}", titulos(&a));
     }
 
     /// El año va arriba, en el centro (en grande si hay sitio), salvo en lo que no depende de él: allí `-` no hace nada.
+    /// Arriba también, dónde estás y quién eres (sus iniciales).
     #[test]
     fn el_anio_arriba_salvo_en_inicio() {
         let hoy = crate::dominio::fmt::anio_actual();
         let mut a = app();
         ir(&mut a, "Facturas");
-        assert!(pantalla(&mut a, 120, 24).lines().next().unwrap().trim_end().ends_with(&format!(" {hoy}")));
-        assert!(pantalla(&mut a, 120, 36).contains("▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀"), "en grande");
+        assert!(pantalla(&mut a, 120, 24).lines().next().unwrap().contains(&format!(" {hoy} ")));
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀"), "en grande");
+        assert!(p.contains("AUTÓNOMO") && p.contains(" AP ") && p.contains("Autónoma de Prueba"), "{p}");
         ir(&mut a, "Inicio");
         assert!(!pantalla(&mut a, 120, 36).contains("▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀"));
         assert!(!pantalla(&mut a, 120, 24).lines().next().unwrap().contains(&hoy.to_string()));
         teclas(&mut a, "-");
         assert_eq!(a.ctx.anio, hoy, "en Inicio, - no cambia el año");
+    }
+
+    #[test]
+    fn iniciales_del_nombre() {
+        assert_eq!(super::super::iniciales("Ana Pérez de la Fuente"), "AF");
+        assert_eq!(super::super::iniciales("Autónoma de Prueba"), "AP");
+        assert_eq!(super::super::iniciales("gesshtor"), "G");
+        assert_eq!(super::super::iniciales(""), "");
     }
 
     /// Ver una pantalla: `PANTALLA=Sueldo TECLAS="<down>" W=120 H=36 DATOS=mock/ana cargo test ver_pantalla --
@@ -252,6 +266,26 @@ mod tests {
         ir(&mut a, &var("PANTALLA", "Inicio"));
         teclas(&mut a, &var("TECLAS", ""));
         println!("{}", pantalla(&mut a, var("W", "120").parse().unwrap(), var("H", "36").parse().unwrap()));
+    }
+
+    /// Una pantalla con sus colores, en JSON (para pasarla a imagen y verla): `PANTALLA=Facturas SALIDA=/tmp/f.json
+    /// cargo test captura -- --ignored` (y `TECLAS`, `W`, `H`, `DATOS`, como en `ver_pantalla`).
+    #[test]
+    #[ignore]
+    fn captura() {
+        let var = |k: &str, defecto: &str| std::env::var(k).unwrap_or_else(|_| defecto.into());
+        let dir = std::env::var("DATOS").map(PathBuf::from).unwrap_or_else(|_| caso("a-de-todo"));
+        let mut a = app_con(cargar(&dir), &dir);
+        ir(&mut a, &var("PANTALLA", "Inicio"));
+        teclas(&mut a, &var("TECLAS", ""));
+        let (w, h): (u16, u16) = (var("W", "120").parse().unwrap(), var("H", "36").parse().unwrap());
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| a.dibujar(f)).unwrap();
+        let b = t.backend().buffer();
+        let filas: Vec<Vec<serde_json::Value>> = (0..h)
+            .map(|y| (0..w).map(|x| { let c = &b[(x, y)]; serde_json::json!([c.symbol(), format!("{:?}", c.fg), format!("{:?}", c.bg), c.modifier.bits()]) }).collect())
+            .collect();
+        std::fs::write(var("SALIDA", "captura.json"), serde_json::to_string(&filas).unwrap()).unwrap();
     }
 
     /// Instantáneas, para comparar antes y después de un cambio que no debería cambiar lo que se ve:

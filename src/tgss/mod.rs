@@ -8,10 +8,12 @@
 //! - `html`: leer HTML (entidades, etiquetas, formularios, URL).
 //! - `importass`: leer las páginas de Importass.
 //! - `sede`: la consulta de cuotas de la Sede (Prosa).
+//! - `reglas`: los tipos y bases de cotización de cada año (para la calculadora de sueldos).
 mod html;
 mod importass;
 #[cfg(test)]
 mod pruebas;
+pub mod reglas;
 mod sede;
 
 use crate::red::certificado::Certificado;

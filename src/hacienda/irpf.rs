@@ -208,6 +208,16 @@ pub struct Cuota {
     pub total: f64,
 }
 
+/// La cuota íntegra de una base liquidable general: (estatal, autonómica), cada escala menos lo del mínimo
+/// personal.
+pub fn cuota_general(r: &Reglas, base: f64) -> (f64, f64) {
+    let e = r.estatal;
+    let (escala, minimo) = r.autonomica.map_or((e.escala, e.minimo), |a| (a.escala, a.minimo));
+    let estatal = r2(por_tramos(e.escala, base) - por_tramos(e.escala, base.min(e.minimo)));
+    let autonomica = r2(por_tramos(escala, base) - por_tramos(escala, base.min(minimo)));
+    (estatal, autonomica)
+}
+
 /// El IRPF de un sueldo bruto anual (`integros`, con lo de en especie) del que te descuentan `ss` de Seguridad
 /// Social, sin otras rentas.
 pub fn cuota_sueldo(r: &Reglas, integros: f64, ss: f64) -> Cuota {
@@ -216,12 +226,37 @@ pub fn cuota_sueldo(r: &Reglas, integros: f64, ss: f64) -> Cuota {
     let otros = e.otros_gastos.min(previo);
     let reduccion = r2(lineal(e.reduccion, previo).min(previo - otros));
     let base = r2(previo - otros - reduccion);
-    let (escala, minimo) = r.autonomica.map_or((e.escala, e.minimo), |a| (a.escala, a.minimo));
-    let estatal = r2(por_tramos(e.escala, base) - por_tramos(e.escala, base.min(e.minimo)));
-    let autonomica = r2(por_tramos(escala, base) - por_tramos(escala, base.min(minimo)));
+    let (estatal, autonomica) = cuota_general(r, base);
     let integra = r2(estatal + autonomica);
     let deduccion = r2(lineal(e.deduccion, integros).min(integra));
     Cuota { base, estatal, autonomica, deduccion, total: r2(integra - deduccion) }
+}
+
+/// La reducción del rendimiento neto de una actividad para quien tiene pocas rentas (art. 32.2.3.º de la Ley del
+/// IRPF): con rentas (sin las exentas) de 8.000 € o menos, 1.620 €; de ahí a 12.000 €, 1.620 € menos el 0,405 de
+/// lo que pasen de 8.000 €; desde 12.000 €, nada. Sin dejar el rendimiento en negativo.
+pub fn reduccion_rentas_bajas(rentas: f64, rendimiento: f64) -> f64 {
+    let r = if rentas <= 8000.0 {
+        1620.0
+    } else if rentas < 12000.0 {
+        1620.0 - 0.405 * (rentas - 8000.0)
+    } else {
+        0.0
+    };
+    r2(r.min(rendimiento.max(0.0)))
+}
+
+/// El IRPF de una actividad de un año entero, sin otras rentas: el rendimiento neto (`rendimiento`: ingresos
+/// menos gastos, con la cuota de autónomo) menos la difícil justificación y la reducción por rentas bajas.
+/// Devuelve (difícil justificación, reducción, base, cuota).
+pub fn cuota_actividad(r: &Reglas, rendimiento: f64) -> (f64, f64, f64, Cuota) {
+    let (pct, max) = gdj_reglas(r.anio);
+    let gdj = if rendimiento > 0.0 { r2((rendimiento * pct / 100.0).min(max)) } else { 0.0 };
+    let neto = r2(rendimiento - gdj);
+    let reduccion = reduccion_rentas_bajas(neto, neto);
+    let base = r2(neto - reduccion).max(0.0);
+    let (estatal, autonomica) = cuota_general(r, base);
+    (gdj, reduccion, base, Cuota { base, estatal, autonomica, deduccion: 0.0, total: r2(estatal + autonomica) })
 }
 
 /* ================= 3. las reglas de cada año ================= */

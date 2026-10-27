@@ -524,7 +524,7 @@ impl Declaraciones {
 
     /// Qué decir cuando no hay nada que enseñar.
     fn vacia(&self, ctx: &Ctx, c: &Consulta) -> Vec<Line<'static>> {
-        let como = "Se consulta con tu certificado: abre la app con --certificado (o pulsa S si ya lo has hecho).";
+        let como = "Se consulta con tu certificado: pulsa S para traerlo.";
         if !self.busca.valor.is_empty() && !self.filas.is_empty() {
             return vec![Line::styled(format!("Nada con «{}».", self.busca.valor), tema::apagado())];
         }
