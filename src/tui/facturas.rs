@@ -6,7 +6,7 @@ use crate::dominio::factura::{self, mencion_iva, serie_factura, siguiente_numero
 use crate::dominio::fmt::{self, dmy, eur, fecha_corta, pct};
 use crate::dominio::{uid, Cliente, Datos, Factura, Linea, Num};
 use crate::informe::autonomo;
-use crate::tui::widgets::{coincide, derecha, guia, linea_atajos, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
+use crate::tui::widgets::{coincide, derecha, guia, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
 use crate::tui::texto::lineas;
 use crate::tui::{Ctx, Pantalla};
 use editor::{Editor, Salida};
@@ -643,14 +643,13 @@ impl Facturas {
         }
     }
 
-    /// Arriba de la lista: los filtros (con su tecla delante y el elegido en FONDO sobre el color de la sección), el
-    /// año y cuántas se ven y, a la derecha si caben, las teclas de buscar y de los clientes (abajo no caben todas);
-    /// en la fila de debajo, si se busca, la búsqueda.
-    fn dibujar_filtros(&self, f: &mut Frame, area: Rect, ctx: &Ctx, n: usize) {
+    /// Arriba de la lista: los filtros (el elegido en FONDO sobre el color de la sección) y cuántas se ven. Las
+    /// teclas (`f`, `/`, `C`…) y el año, solo abajo y arriba: aquí no se repiten. En la fila de debajo, si se busca,
+    /// la búsqueda.
+    fn dibujar_filtros(&self, f: &mut Frame, area: Rect, _ctx: &Ctx, n: usize) {
         let gris = tema::apagado();
         let negrita = Style::new().add_modifier(Modifier::BOLD);
-        // La «f» delante: es la que pasa de un filtro a otro.
-        let mut v = vec![Span::styled("f ", negrita)];
+        let mut v = Vec::new();
         for (i, x) in [Filtro::Todas, Filtro::Pendientes, Filtro::Borradores].into_iter().enumerate() {
             if i > 0 {
                 v.push(Span::raw("  "));
@@ -658,14 +657,9 @@ impl Facturas {
             // Todas con su hueco a cada lado: al cambiar de filtro no se mueve nada.
             v.push(Span::styled(format!(" {} ", x.nombre()), if x == self.filtro { tema::pestana_activa() } else { gris }));
         }
-        v.extend([Span::raw("     "), Span::styled(ctx.anio.to_string(), negrita), Span::styled(format!(" · {}", plural(n)), gris)]);
-        let usado = Line::from(v.clone()).width();
+        v.extend([Span::raw("     "), Span::styled(plural(n), gris)]);
         let fila = Rect { height: area.height.min(1), ..area };
         f.render_widget(Paragraph::new(Line::from(v)), fila);
-        let teclas = linea_atajos(&[("/", "buscar"), ("C", "clientes")]);
-        if !self.buscando && usado + 5 + teclas.width() <= area.width as usize {
-            f.render_widget(Paragraph::new(teclas.right_aligned()), fila);
-        }
         if (self.buscando || !self.busca.valor.is_empty()) && area.height >= 2 {
             let fila = Rect { y: area.y + 1, height: 1, ..area };
             let [e, t] = Layout::horizontal([Constraint::Length(7), Constraint::Min(1)]).areas(fila);
@@ -1067,16 +1061,19 @@ impl Pantalla for Facturas {
             }
             return v;
         }
-        let mut v = match self.elegida {
-            Some(true) => vec![("Enter", "editar"), ("E", "emitir"), ("d", "borrar"), ("D", "duplicar")],
-            Some(false) if self.ver => vec![("← →", "otra"), ("Esc", "volver"), ("c", "cobrada"), ("D", "duplicar"), ("o", "doc"), ("C", "su cliente")],
-            Some(false) => vec![("Enter", "ver"), ("c", "cobrada"), ("D", "duplicar"), ("o", "doc")],
-            None => vec![],
+        // Las de filtrar y buscar, pronto: abajo se recortan por el final y arriba ya no se repiten.
+        let (primeras, resto) = match self.elegida {
+            Some(true) => (vec![("Enter", "editar"), ("E", "emitir")], vec![("D", "duplicar"), ("d", "borrar")]),
+            Some(false) if self.ver => return vec![("n", "nueva"), ("← →", "otra"), ("Esc", "volver"), ("c", "cobrada"), ("D", "duplicar"), ("o", "doc"), ("C", "su cliente")],
+            Some(false) => (vec![("Enter", "ver"), ("c", "cobrada")], vec![("D", "duplicar"), ("o", "doc")]),
+            None => (vec![], vec![]),
         };
-        v.insert(0, ("n", "nueva"));
+        let mut v = vec![("n", "nueva")];
+        v.extend(primeras);
         if !self.ver {
             v.extend([("f", "filtro"), ("/", "buscar"), ("C", "clientes")]);
         }
+        v.extend(resto);
         v
     }
 }
@@ -1096,7 +1093,9 @@ mod tests {
         let mut a = app_con(d, &dir);
         ir(&mut a, "Facturas");
         let p = pantalla(&mut a, 120, 36);
-        assert!(p.contains("f  Todas    Pendientes de cobro    Borradores ") && p.contains(&format!("facturado en {} ··", anio_actual())), "{p}");
+        assert!(p.contains(" Todas    Pendientes de cobro    Borradores ") && p.contains(&format!("facturado en {} ··", anio_actual())), "{p}");
+        // Arriba, sin las teclas ni el año (ya están en el pie y en la cabecera).
+        assert!(!p.contains("f  Todas") && !p.contains(&format!("{} · ", anio_actual())), "{p}");
         assert!(p.contains("pendiente de cobro ··") && !p.contains('│') && !p.contains('╭'), "{p}");
         let cabecera = p.lines().find(|l| l.contains("número")).unwrap_or_default();
         assert!(cabecera.contains("cliente") && cabecera.contains("total") && cabecera.contains("estado"), "{p}");

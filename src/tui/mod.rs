@@ -1184,7 +1184,7 @@ mod tests {
         // En Facturas, sin lo de navegar, con «S traer» y las teclas que caben, de la primera en adelante.
         ir(&mut a, "Facturas");
         let p = pie(&mut a, 120, 36);
-        assert!(p.starts_with("    n nueva   Enter ver   c cobrada   D duplicar   o doc   f filtro   / buscar   "), "{p}");
+        assert!(p.starts_with("    n nueva   Enter ver   c cobrada   f filtro   / buscar   C clientes   "), "{p}");
         assert!(p.ends_with("S traer     ? ayuda   q salir") && !p.contains("sección") && !p.contains("r a p u"), "{p}");
         let p = pie(&mut a, 80, 24);
         assert!(p.starts_with("  n nueva   Enter ver   c cobrada") && p.ends_with("S traer     ? ayuda   q salir"), "{p}");

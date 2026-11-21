@@ -691,13 +691,13 @@ impl Gastos {
         f.render_widget(Paragraph::new(v), area);
     }
 
-    /// Arriba de la lista, como en Facturas: los trimestres (con su tecla, `t`, delante y el elegido en FONDO sobre
-    /// el color de la sección), la categoría (con la `c`), el año y cuántos se ven y, a la derecha si caben, las teclas
-    /// de buscar y de quitar los filtros (abajo no caben todas); en la fila de debajo, si se busca, la búsqueda.
-    fn dibujar_filtros(&self, f: &mut Frame, area: Rect, ctx: &Ctx, n: usize) {
+    /// Arriba de la lista, como en Facturas: los trimestres (el elegido en FONDO sobre el color de la sección), la
+    /// categoría si hay una elegida y cuántos se ven. Las teclas (`t`, `c`, `/`…) y el año, solo abajo y arriba: aquí
+    /// no se repiten. En la fila de debajo, si se busca, la búsqueda.
+    fn dibujar_filtros(&self, f: &mut Frame, area: Rect, _ctx: &Ctx, n: usize) {
         let gris = tema::apagado();
         let negrita = Style::new().add_modifier(Modifier::BOLD);
-        let mut trimestres = vec![Span::styled("t ", negrita)];
+        let mut trimestres = Vec::new();
         for (i, t) in ["Año", "1T", "2T", "3T", "4T"].iter().enumerate() {
             if i > 0 {
                 trimestres.push(Span::raw(" "));
@@ -705,31 +705,20 @@ impl Gastos {
             // Todos con su hueco a cada lado: al cambiar de trimestre no se mueve nada.
             trimestres.push(Span::styled(format!(" {t} "), if i as u32 == self.q { tema::pestana_activa() } else { gris }));
         }
-        let cuantos = [Span::styled(ctx.anio.to_string(), negrita), Span::styled(format!(" · {}", plural(n)), gris)];
-        // La categoría, con la `c` delante: la elegida, como el trimestre; si no hay, «todas», en gris.
-        let linea = |hueco: &'static str, largo: bool| {
+        // La categoría, solo si hay una elegida (como el trimestre); luego, cuántos se ven.
+        let linea = |hueco: &'static str| {
             let mut v = trimestres.clone();
-            v.extend([Span::raw(hueco), Span::styled("c ", negrita)]);
-            v.push(match self.cat.as_str() {
-                "" => Span::styled(if largo { " todas las categorías " } else { " todas " }, gris),
-                c => Span::styled(format!(" {} ", cat_corta(c)), tema::pestana_activa()),
-            });
-            v.push(Span::raw(hueco));
-            v.extend(cuantos.clone());
+            if !self.cat.is_empty() {
+                v.extend([Span::raw(hueco), Span::styled(format!(" {} ", cat_corta(&self.cat)), tema::pestana_activa())]);
+            }
+            v.extend([Span::raw(hueco), Span::styled(plural(n), gris)]);
             Line::from(v)
         };
-        let teclas = if self.hay_filtros() { linea_atajos(&[("Esc", "sin filtros"), ("/", "buscar")]) } else { linea_atajos(&[("/", "buscar")]) };
-        // Lo más largo que quepa con las teclas a la derecha; si no caben, lo más largo que quepa.
         let w = area.width as usize;
-        let variantes = [linea("     ", true), linea("   ", true), linea("   ", false)];
-        let con_teclas = !self.buscando && variantes.iter().any(|l| l.width() + 5 + teclas.width() <= w);
-        let l = if con_teclas { variantes.iter().find(|l| l.width() + 5 + teclas.width() <= w) } else { variantes.iter().find(|l| l.width() <= w) };
-        let l = l.unwrap_or(&variantes[2]).clone();
+        let variantes = [linea("     "), linea("   ")];
+        let l = variantes.iter().find(|l| l.width() <= w).unwrap_or(&variantes[1]).clone();
         let fila = Rect { height: area.height.min(1), ..area };
         f.render_widget(Paragraph::new(l), fila);
-        if con_teclas {
-            f.render_widget(Paragraph::new(teclas.right_aligned()), fila);
-        }
         if (self.buscando || !self.busca.valor.trim().is_empty()) && area.height >= 2 {
             let fila = Rect { y: area.y + 1, height: 1, ..area };
             let [e, t] = Layout::horizontal([Constraint::Length(7), Constraint::Min(1)]).areas(fila);
@@ -994,20 +983,24 @@ impl Pantalla for Gastos {
             Modo::Ficha if self.cerrado => vec![("Esc", "volver"), ("↑↓", "otro gasto"), ("PgUp PgDn", "desplazar"), ("o", "documento")],
             Modo::Ficha => vec![("Esc", "volver"), ("↑↓", "otro gasto"), ("PgUp PgDn", "desplazar"), ("Enter", "editar"), ("D", "duplicar"), ("d", "borrar"), ("o", "documento")],
             Modo::Lista if self.cerrado && !self.buscando => {
-                let mut v = vec![("Enter", "ficha"), ("o", "documento"), ("t", "trimestre"), ("c", "categoría"), ("/", "buscar")];
+                // Las de filtrar, pronto: abajo se recortan por el final y arriba ya no se repiten.
+                let mut v = vec![("Enter", "ficha"), ("t", "trimestre"), ("c", "categoría"), ("/", "buscar")];
                 if self.hay_filtros() {
                     v.push(("Esc", "sin filtros"));
                 }
+                v.push(("o", "documento"));
                 v
             }
             Modo::Lista if self.buscando => vec![("Enter", "aceptar"), ("Esc", "quitar la búsqueda"), ("↑↓", "mover")],
             Modo::Lista => {
                 let mut v = vec![("n", "nuevo")];
                 v.push(("Enter", if self.ficha_al_lado() { "editar" } else { "ficha" }));
-                v.extend([("d", "borrar"), ("D", "duplicar"), ("o", "documento"), ("t", "trimestre"), ("c", "categoría"), ("/", "buscar")]);
+                // Las de filtrar, pronto: abajo se recortan por el final y arriba ya no se repiten.
+                v.extend([("t", "trimestre"), ("c", "categoría"), ("/", "buscar")]);
                 if self.hay_filtros() {
                     v.push(("Esc", "sin filtros"));
                 }
+                v.extend([("o", "documento"), ("D", "duplicar"), ("d", "borrar")]);
                 v
             }
         }
@@ -1031,7 +1024,9 @@ mod tests {
         let mut a = app_con(d, &dir);
         ir(&mut a, "Gastos");
         let p = pantalla(&mut a, 120, 36);
-        assert!(p.contains("t  Año   1T   2T   3T   4T") && p.contains(&format!("pagado en {} ··", anio_actual())), "{p}");
+        assert!(p.contains(" Año   1T   2T   3T   4T") && p.contains(&format!("pagado en {} ··", anio_actual())), "{p}");
+        // Arriba, sin las teclas ni «todas las categorías» ni el año (ya están en el pie y en la cabecera).
+        assert!(!p.contains("t  Año") && !p.contains("todas las categorías") && !p.contains(&format!("{} · ", anio_actual())), "{p}");
         assert!(p.contains("IVA deducible ··") && p.contains("con documento ··") && !p.contains('│') && !p.contains('┌'), "{p}");
         let cabecera = p.lines().find(|l| l.contains("proveedor")).unwrap_or_default();
         assert!(cabecera.contains("fecha") && cabecera.contains("IVA deduc.") && cabecera.contains("gasto IRPF"), "{p}");
