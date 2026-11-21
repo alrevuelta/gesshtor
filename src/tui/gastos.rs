@@ -25,6 +25,9 @@ const ANCHO_FICHA: u16 = 110;
 /// La ficha a pantalla completa, no más ancha de lo que se lee bien (como el detalle de una factura).
 const ANCHO_HOJA: u16 = 60;
 
+/// Los trimestres en el orden en que se ven y se recorren con ← →, como en Impuestos (0, todo el año).
+const ORDEN_Q: [u32; 5] = [1, 2, 3, 4, 0];
+
 #[derive(Default)]
 pub struct Gastos {
     /// Trimestre que se ve (0 = todo el año).
@@ -594,12 +597,11 @@ impl Gastos {
                 self.busca = Entrada::default();
                 self.sel = 0;
             }
-            KeyCode::Char('t') => {
-                self.q = (self.q + 1) % 5;
-                self.sel = 0;
-            }
-            KeyCode::Char('T') => {
-                self.q = (self.q + 4) % 5;
+            // El trimestre, con ← →, como en Impuestos: 1T 2T 3T 4T año (sin dar la vuelta).
+            KeyCode::Left | KeyCode::Right if !ficha => {
+                let i = ORDEN_Q.iter().position(|&q| q == self.q).unwrap_or(4);
+                let j = if k.code == KeyCode::Left { i.saturating_sub(1) } else { (i + 1).min(ORDEN_Q.len() - 1) };
+                self.q = ORDEN_Q[j];
                 self.sel = 0;
             }
             KeyCode::Char('c') => self.modo = Modo::Categoria(self.selector_categorias(ctx)),
@@ -698,12 +700,14 @@ impl Gastos {
         let gris = tema::apagado();
         let negrita = Style::new().add_modifier(Modifier::BOLD);
         let mut trimestres = Vec::new();
-        for (i, t) in ["Año", "1T", "2T", "3T", "4T"].iter().enumerate() {
+        // En el orden de Impuestos: 1T 2T 3T 4T año (← → se mueve por ellos).
+        for (i, &q) in ORDEN_Q.iter().enumerate() {
             if i > 0 {
                 trimestres.push(Span::raw(" "));
             }
+            let t = if q == 0 { "año".to_string() } else { format!("{q}T") };
             // Todos con su hueco a cada lado: al cambiar de trimestre no se mueve nada.
-            trimestres.push(Span::styled(format!(" {t} "), if i as u32 == self.q { tema::pestana_activa() } else { gris }));
+            trimestres.push(Span::styled(format!(" {t} "), if q == self.q { tema::pestana_activa() } else { gris }));
         }
         // La categoría, solo si hay una elegida (como el trimestre); luego, cuántos se ven.
         let linea = |hueco: &'static str| {
@@ -984,7 +988,7 @@ impl Pantalla for Gastos {
             Modo::Ficha => vec![("Esc", "volver"), ("↑↓", "otro gasto"), ("PgUp PgDn", "desplazar"), ("Enter", "editar"), ("D", "duplicar"), ("d", "borrar"), ("o", "documento")],
             Modo::Lista if self.cerrado && !self.buscando => {
                 // Las de filtrar, pronto: abajo se recortan por el final y arriba ya no se repiten.
-                let mut v = vec![("Enter", "ficha"), ("t", "trimestre"), ("c", "categoría"), ("/", "buscar")];
+                let mut v = vec![("Enter", "ficha"), ("← →", "trimestre"), ("c", "categoría"), ("/", "buscar")];
                 if self.hay_filtros() {
                     v.push(("Esc", "sin filtros"));
                 }
@@ -996,7 +1000,7 @@ impl Pantalla for Gastos {
                 let mut v = vec![("n", "nuevo")];
                 v.push(("Enter", if self.ficha_al_lado() { "editar" } else { "ficha" }));
                 // Las de filtrar, pronto: abajo se recortan por el final y arriba ya no se repiten.
-                v.extend([("t", "trimestre"), ("c", "categoría"), ("/", "buscar")]);
+                v.extend([("← →", "trimestre"), ("c", "categoría"), ("/", "buscar")]);
                 if self.hay_filtros() {
                     v.push(("Esc", "sin filtros"));
                 }
@@ -1024,9 +1028,9 @@ mod tests {
         let mut a = app_con(d, &dir);
         ir(&mut a, "Gastos");
         let p = pantalla(&mut a, 120, 36);
-        assert!(p.contains(" Año   1T   2T   3T   4T") && p.contains(&format!("pagado en {} ··", anio_actual())), "{p}");
+        assert!(p.contains(" 1T   2T   3T   4T   año ") && p.contains(&format!("pagado en {} ··", anio_actual())), "{p}");
         // Arriba, sin las teclas ni «todas las categorías» ni el año (ya están en el pie y en la cabecera).
-        assert!(!p.contains("t  Año") && !p.contains("todas las categorías") && !p.contains(&format!("{} · ", anio_actual())), "{p}");
+        assert!(!p.contains("t  1T") && !p.contains("todas las categorías") && !p.contains(&format!("{} · ", anio_actual())), "{p}");
         assert!(p.contains("IVA deducible ··") && p.contains("con documento ··") && !p.contains('│') && !p.contains('┌'), "{p}");
         let cabecera = p.lines().find(|l| l.contains("proveedor")).unwrap_or_default();
         assert!(cabecera.contains("fecha") && cabecera.contains("IVA deduc.") && cabecera.contains("gasto IRPF"), "{p}");

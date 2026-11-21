@@ -108,7 +108,7 @@ abre el PDF, `S` trae lo último de Hacienda y la Seguridad Social, `!` enseña 
 
 | Tecla | Qué hace |
 |---|---|
-| `r` `e` `a` `i` `u` | ir a la sección (a la pestaña en la que la dejaste) |
+| `r` `e` `a` `p` `u` | ir a la sección (a la pestaña en la que la dejaste) |
 | `1` … `9` | ir a esa pestaña de la sección |
 | `Tab`, `Mayús+Tab` | pestaña siguiente / anterior |
 | `-` `+` | año anterior / siguiente |
@@ -116,7 +116,8 @@ abre el PDF, `S` trae lo último de Hacienda y la Seguridad Social, `!` enseña 
 | `n` · `d` · `D` | nuevo · borrar · duplicar (facturas y gastos) |
 | `E` · `c` · `C` | en Facturas: emitir · cobrada · tus clientes |
 | `b` · `x` | en Patrimonio › Este año: traer lo de tu bróker (la primera vez, activar su conexión) · desconectarlo |
-| `t` | en Gastos, el trimestre; en Declaraciones, todos los años; en Impuestos, todas las casillas |
+| `←` `→` | en Gastos e Impuestos, el trimestre (1T 2T 3T 4T año; en Impuestos, también el 390) |
+| `t` | en Declaraciones, todos los años; en Impuestos, todas las casillas |
 | `/` · `o` · `S` · `?` · `q` | buscar · abrir el PDF · traer lo último · ayuda · salir |
 | soltar un fichero | clasificarlo con Claude (si está encendido: ver «Arrastrar documentos») |
 | `!` | lo que no se ha podido leer o traer, entero; `c` lo copia y lo guarda |
