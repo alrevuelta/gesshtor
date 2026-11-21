@@ -46,6 +46,8 @@ pub mod tema {
     pub const SUAVE_NARANJA: Color = Color::Rgb(0x33, 0x24, 0x1a);
     /// …y el sello «de más».
     pub const SUAVE_AVISO: Color = Color::Rgb(0x33, 0x28, 0x1a);
+    /// El fondo de la barra de las teclas, abajo: un poco más claro que FONDO.
+    pub const BARRA: Color = Color::Rgb(0x28, 0x24, 0x36);
 
     /// El color de cada sección: la letra del menú, la pestaña activa y lo destacado de esa sección.
     pub const RESUMEN: Color = Color::Rgb(0xb6, 0x9c, 0xff);

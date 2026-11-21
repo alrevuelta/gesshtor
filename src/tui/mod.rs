@@ -213,20 +213,25 @@ struct Zonas {
 impl Zonas {
     /// Con el carril: el contenido desde la columna `CONTENIDO` y la fila `FILA_CONTENIDO`. Sin él: desde la
     /// columna `MARGEN` y, debajo de las dos filas de arriba, una de aire (si hay sitio). Siempre, dos columnas
-    /// libres a la derecha; los avisos en la penúltima fila y las teclas en la última.
+    /// libres a la derecha. Abajo, los avisos y, debajo, la barra de las teclas, con `MARGEN` a cada lado y (si hay
+    /// sitio) una fila de aire debajo.
     fn de(a: Rect) -> Self {
         let carril = a.width >= ANCHO_CARRIL;
         let (x, y) = if carril { (CONTENIDO, FILA_CONTENIDO) } else { (MARGEN, if a.height >= 20 { 3 } else { 2 }) };
         let x = x.min(a.width);
         let ancho = a.width.saturating_sub(MARGEN).saturating_sub(x);
-        let fila_avisos = a.height.saturating_sub(2);
+        let aire = if a.height >= 20 { 1 } else { 0 };
+        // La barra de abajo, con `MARGEN` a cada lado; en terminal estrecho, con uno (cada columna cuenta).
+        let borde = if carril { MARGEN } else { 1 };
+        let fila_pie = a.height.saturating_sub(1 + aire);
+        let fila_avisos = fila_pie.saturating_sub(1);
         let y = y.min(fila_avisos);
         let una = a.height.min(1);
         Zonas {
             carril,
             contenido: Rect::new(a.x + x, a.y + y, ancho, fila_avisos - y),
             avisos: Rect::new(a.x + x, a.y + fila_avisos, ancho, una),
-            pie: Rect::new(a.x + MARGEN.min(a.width), a.y + a.height.saturating_sub(1), a.width.saturating_sub(2 * MARGEN), una),
+            pie: Rect::new(a.x + borde.min(a.width), a.y + fila_pie, a.width.saturating_sub(2 * borde), una),
         }
     }
 }
@@ -847,6 +852,10 @@ impl App {
     /// «S traer» y solo entonces se quitan teclas de la pantalla, de la última a la primera. «? ayuda» y «q salir»,
     /// siempre. Escribiendo, solo las de la pantalla (las demás no llegan a la app), enteras: ver `teclas_apretadas`.
     fn pie(&self, f: &mut Frame, area: Rect, carril: bool) {
+        // Una barra con su propio fondo y aire dentro, a cada lado: dos columnas (una en terminal estrecho).
+        f.buffer_mut().set_style(area, Style::new().bg(tema::BARRA));
+        let dentro = if carril { 2 } else { 1 };
+        let area = Rect { x: area.x + dentro.min(area.width), width: area.width.saturating_sub(2 * dentro), ..area };
         let p = self.pantalla();
         let mut propias = p.atajos();
         // La S va siempre a la derecha.
@@ -1113,7 +1122,7 @@ mod tests {
         assert!(filas[1].contains("1 Sueldo     2 Nóminas") && !filas[1].contains("Facturas"), "{p}");
         assert_eq!(filas[2].chars().position(|c| c == '▀'), Some(super::CONTENIDO as usize + "1 Sueldo     ".len()), "{p}");
         // Y abajo, cómo se navega (sin las palabras si no caben con las teclas de la pantalla).
-        assert!(filas[35].starts_with("  r e a p u ") && filas[35].contains("1 2"), "{p}");
+        assert!(filas[34].starts_with("    r e a p u ") && filas[34].contains("1 2"), "{p}");
         // Con la terminal estrecha, arriba: el nombre y las letras de las secciones (la tuya, con su nombre) y,
         // debajo, las pestañas de la tuya.
         let p = pantalla(&mut a, 80, 24);
@@ -1167,15 +1176,15 @@ mod tests {
     /// las teclas del final. «? ayuda» y «q salir», siempre. Escribiendo, enteras aunque sea recortando lo que dicen.
     #[test]
     fn el_pie_da_prioridad_a_las_teclas_de_la_pantalla() {
-        let pie = |a: &mut App, w: u16, h: u16| pantalla(a, w, h).lines().nth(h as usize - 1).unwrap().to_string();
+        let pie = |a: &mut App, w: u16, h: u16| pantalla(a, w, h).lines().nth(h as usize - 2).unwrap().to_string();
         let mut a = app();
         // Con sitio de sobra (Inicio tiene una sola tecla), todo entero.
         let p = pie(&mut a, 120, 36);
-        assert_eq!(p, format!("  r a p u sección   1 2 3 pestaña     Tab más{}S traer lo último     ? ayuda   q salir", " ".repeat(34)));
+        assert_eq!(p, format!("    r a p u sección   1 2 3 pestaña     Tab más{}S traer lo último     ? ayuda   q salir", " ".repeat(30)));
         // En Facturas, sin lo de navegar, con «S traer» y las teclas que caben, de la primera en adelante.
         ir(&mut a, "Facturas");
         let p = pie(&mut a, 120, 36);
-        assert!(p.starts_with("  n nueva   Enter ver   c cobrada   D duplicar   o doc   f filtro   / buscar   "), "{p}");
+        assert!(p.starts_with("    n nueva   Enter ver   c cobrada   D duplicar   o doc   f filtro   / buscar   "), "{p}");
         assert!(p.ends_with("S traer     ? ayuda   q salir") && !p.contains("sección") && !p.contains("r a p u"), "{p}");
         let p = pie(&mut a, 80, 24);
         assert!(p.starts_with("  n nueva   Enter ver   c cobrada") && p.ends_with("S traer     ? ayuda   q salir"), "{p}");
@@ -1183,7 +1192,7 @@ mod tests {
         let mut a = con_empleo();
         teclas(&mut a, "e2");
         let p = pie(&mut a, 120, 36);
-        assert!(p.starts_with("  r e a p u   1 2     n nueva") && p.ends_with("S traer lo último     ? ayuda   q salir"), "{p}");
+        assert!(p.starts_with("    r e a p u   1 2     n nueva") && p.ends_with("S traer lo último     ? ayuda   q salir"), "{p}");
         // Escribiendo (el editor de una factura), a 80 columnas: todas las teclas, con lo que dicen recortado.
         ir(&mut a, "Facturas");
         teclas(&mut a, "n<esc>");

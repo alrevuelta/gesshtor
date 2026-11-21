@@ -945,7 +945,7 @@ mod tests {
         // Oculta (con Esc), la pantalla de debajo está como estaba (salvo la fila de los avisos).
         teclas(&mut a, "<esc>");
         let ahora = pantalla(&mut a, 120, 36);
-        let sin_avisos = |p: &str| p.lines().enumerate().filter(|(i, _)| *i != 34).map(|(_, l)| l.to_string()).collect::<Vec<_>>();
+        let sin_avisos = |p: &str| p.lines().enumerate().filter(|(i, _)| *i != 33).map(|(_, l)| l.to_string()).collect::<Vec<_>>();
         assert_eq!(sin_avisos(&antes), sin_avisos(&ahora));
         std::fs::remove_dir_all(dir).unwrap();
     }
