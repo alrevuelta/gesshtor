@@ -1,6 +1,8 @@
-//! Un navegador mínimo para hablar con Hacienda y la Seguridad Social: identifica con el certificado en la
-//! conexión TLS, guarda las cookies de la sesión y sigue las redirecciones a mano, solo dentro de los dominios
-//! permitidos (nunca se manda nada a otro sitio).
+//! Un navegador mínimo para hablar con Hacienda y la Seguridad Social (y, solo si activas su conector, con tu
+//! bróker): identifica con el certificado en la conexión TLS, guarda las cookies de la sesión y sigue las
+//! redirecciones a mano, solo dentro de los dominios permitidos (nunca se manda nada a otro sitio). Hay otro,
+//! Anthropic (`DOMINIOS_ANTHROPIC`), solo si la persona activa que Claude clasifique los documentos que arrastra
+//! (ver `clasificar`); si no, no se usa.
 use super::certificado::Certificado;
 use std::time::Duration;
 
@@ -14,6 +16,11 @@ const MAX_CUERPO: u64 = 30 * 1024 * 1024;
 pub const DOMINIOS_AEAT: &[&str] = &["agenciatributaria.gob.es", "agenciatributaria.es", "aeat.es"];
 /// La Seguridad Social.
 pub const DOMINIOS_TGSS: &[&str] = &["seg-social.es", "seg-social.gob.es"];
+/// La API de Claude: solo con la clasificación de documentos activada (`PANEL_CLASIFICAR=api`).
+pub const DOMINIOS_ANTHROPIC: &[&str] = &["api.anthropic.com"];
+/// DEGIRO: solo su web (la de su plataforma, la misma que usa tu navegador). Solo lo usa su conector
+/// (`brokers::degiro`), y solo si lo has activado (`brokers::traer`).
+pub const DOMINIOS_DEGIRO: &[&str] = &["trader.degiro.nl"];
 
 /// Una respuesta: la URL a la que se llegó (tras las redirecciones), el código, las cabeceras y el cuerpo.
 #[derive(Debug, Clone, Default)]
@@ -49,6 +56,9 @@ pub enum Cuerpo<'a> {
 pub struct Cliente {
     agente: ureq::Agent,
     dominios: &'static [&'static str],
+    /// Cabeceras que van en todas las peticiones, además de las de siempre (la clave de la API de Claude y su
+    /// versión; el `Origin` de DEGIRO).
+    cabeceras: Vec<(&'static str, String)>,
 }
 
 impl Cliente {
@@ -63,7 +73,44 @@ impl Cliente {
             .timeout_global(Some(Duration::from_secs(90)))
             .user_agent(UA)
             .build();
-        Cliente { agente: config.into(), dominios }
+        Cliente { agente: config.into(), dominios, cabeceras: Vec::new() }
+    }
+
+    /// La misma sesión, mandando además estas cabeceras en cada petición.
+    pub fn con_cabeceras(mut self, cabeceras: Vec<(&'static str, String)>) -> Cliente {
+        self.cabeceras.extend(cabeceras);
+        self
+    }
+
+    /// La misma sesión, con una cabecera más en todas las peticiones (`Origin`, como las manda un navegador).
+    pub fn con_cabecera(mut self, nombre: &'static str, valor: &'static str) -> Cliente {
+        self.cabeceras.push((nombre, valor.to_string()));
+        self
+    }
+
+    /// Pone una cookie de la sesión para un sitio permitido (la que identifica la sesión, si la web la da en el
+    /// cuerpo de la respuesta y no en una cookie).
+    pub fn cookie(&self, url: &str, nombre: &str, valor: &str) -> Result<(), String> {
+        let mal = |e: &dyn std::fmt::Display| format!("No se puede guardar la cookie de la sesión: {e}");
+        if !self.permitida(url) {
+            return Err(mal(&"no es un sitio permitido"));
+        }
+        let uri: ureq::http::Uri = url.parse().map_err(|e| mal(&e))?;
+        let c = ureq::Cookie::parse(format!("{nombre}={valor}; Path=/"), &uri).map_err(|e| mal(&e))?;
+        self.agente.cookie_jar_lock().insert(c, &uri).map_err(|e| mal(&e))
+    }
+
+    /// PUT sin cuerpo, sin seguir redirecciones (cerrar la sesión).
+    pub fn put(&self, url: &str) -> Result<Respuesta, String> {
+        if !self.permitida(url) {
+            return Err("No es un sitio permitido: no se manda nada.".into());
+        }
+        let mut p = self.agente.put(url);
+        for (k, v) in &self.cabeceras {
+            p = p.header(*k, v.as_str());
+        }
+        let r = p.send_empty().map_err(|e| traducir(&e, url))?;
+        Ok(Respuesta { url: url.to_string(), codigo: r.status().as_u16(), ..Default::default() })
     }
 
     /// ¿Es de un dominio permitido (y https)?
@@ -113,12 +160,18 @@ impl Cliente {
                 if let Some(rf) = referer {
                     p = p.header("Referer", rf);
                 }
+                for (k, v) in &self.cabeceras {
+                    p = p.header(*k, v.as_str());
+                }
                 p.call().map_err(error)?
             }
             Some(c) => {
                 let mut p = self.agente.post(url).header("Accept-Language", "es-ES,es;q=0.9");
                 if let Some(rf) = referer {
                     p = p.header("Referer", rf);
+                }
+                for (k, v) in &self.cabeceras {
+                    p = p.header(*k, v.as_str());
                 }
                 match c {
                     Cuerpo::Formulario(campos) => p.send_form(campos.iter().copied()).map_err(error)?,
@@ -205,28 +258,18 @@ mod tests {
         assert!(!c.permitida("http://portal.seg-social.gob.es/wps"));
         assert!(!c.permitida("https://seg-social.es.malo.com/"));
         assert!(!c.permitida("https://www1.agenciatributaria.gob.es/"));
+        let c = Cliente::new(None, DOMINIOS_ANTHROPIC);
+        assert!(c.permitida("https://api.anthropic.com/v1/messages"));
+        assert!(!c.permitida("https://anthropic.com.malo.es/v1/messages"));
+        // DEGIRO: solo su plataforma, ni otro subdominio suyo.
+        let d = Cliente::new(None, DOMINIOS_DEGIRO);
+        assert!(d.permitida("https://trader.degiro.nl/login/secure/login"));
+        assert!(!d.permitida("https://www.degiro.nl/") && !d.permitida("https://charting.vwdservices.com/") && !d.permitida("https://trader.degiro.nl.malo.com/"));
+        assert!(d.cookie("https://trader.degiro.nl/", "JSESSIONID", "x").is_ok() && d.cookie("https://malo.com/", "JSESSIONID", "x").is_err());
     }
 
     #[test]
     fn formulario_en_latin1() {
         assert_eq!(formulario_latin1(&[("ANR", "LÓPEZ PEÑA"), ("MOD", "303")]), b"ANR=L%D3PEZ+PE%D1A&MOD=303".to_vec());
-    }
-}
-
-#[cfg(test)]
-mod red_de_verdad {
-    use super::*;
-
-    /// Con internet: `cargo test conexion_real -- --ignored --nocapture`. El certificado de prueba no es de la
-    /// FNMT: Hacienda acepta la conexión TLS con él y contesta que no lo admite (erro4011).
-    #[test]
-    #[ignore]
-    fn conexion_real_con_certificado_de_prueba() {
-        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pruebas/prueba.p12");
-        let cert = Certificado::abrir(&p, "prueba").unwrap();
-        let c = Cliente::new(Some(&cert), DOMINIOS_AEAT);
-        let r = c.post("https://www1.agenciatributaria.gob.es/wlpl/SCEJ-MANT/ConsultaExt", Cuerpo::Bytes(b"", "application/x-www-form-urlencoded"), None).unwrap();
-        println!("{} {} {}", r.codigo, r.url, r.cuerpo.len());
-        assert!(r.url.contains("/errores/erro40"), "{}", r.url);
     }
 }

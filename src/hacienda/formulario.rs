@@ -2,13 +2,14 @@
 //! (`Formulario`, en su fichero) y cómo se lee uno cualquiera de su PDF (`leer`).
 //!
 //! Leer es emparejar cada número de casilla con el importe que tiene a su derecha (ver `generico`). Antes de dar
-//! nada por bueno: el PDF tiene que ser de ese modelo y periodo, y lo leído tiene que cuadrar con las sumas del
-//! propio modelo.
+//! nada por bueno: el PDF tiene que ser de ese modelo y periodo (y decirlo: su devengo), tienen que verse sus anclas
+//! (las casillas que enseña todo PDF de ese modelo), lo leído tiene que cuadrar con las sumas del propio modelo y, si
+//! tiene portada, tiene que entenderse cómo se presentó. Si no, es un fallo (`Fallo`), nunca casillas a 0.
 //!
 //! Para añadir un modelo: un fichero `modelo_XXX.rs` con un `impl Formulario`, su caso en `Modelo` y su línea en
 //! `lectura::leer_pdf`. El compilador no deja olvidar nada de lo que tiene que decir.
 use super::generico::{self, Hoja};
-use super::modelo::{Fallo, Modelo, Periodicidad, Periodo};
+use super::modelo::{Descuadre, Fallo, Modelo, Periodicidad, Periodo};
 use super::pdf::{Documento, Palabra};
 use crate::dominio::hacienda::Tipo;
 use crate::dominio::{Casillas, FormularioLeido, Valor};
@@ -20,6 +21,10 @@ pub trait Formulario {
     const PERIODICIDAD: Periodicidad;
     /// Qué casillas tiene.
     const CASILLAS: QueCasillas;
+    /// Las que enseña todo PDF presentado de este modelo (su resultado…): si no se ve alguna, el PDF ha cambiado.
+    const ANCLAS: &'static [u32];
+    /// ¿Dice su portada cómo se presentó (a ingresar, a compensar…)? (el 390, no)
+    const TIPO_EN_PORTADA: bool = true;
 
     /// Las sumas del propio modelo: cada casilla con lo que debe valer según las demás (las que no están valen 0).
     /// Si alguna no cuadra, la lectura no vale.
@@ -73,32 +78,44 @@ pub fn leer<F: Formulario>(doc: &Documento, ejercicio: i32, periodo: &Periodo) -
     };
     comprobar(doc, modelo, ejercicio, periodo)?;
 
-    let vale = |n: &str| n.parse::<u32>().is_ok_and(|n| validas.is_none_or(|v| v.contains(&n)));
+    let numero = |n: &str| n.parse::<u32>().ok().filter(|n| validas.is_none_or(|v| v.contains(n)));
     let mut casillas: Casillas = validas.unwrap_or_default().iter().map(|&n| (n, 0.0)).collect();
-    let mut leidas = 0;
+    let mut vistas = std::collections::BTreeSet::new();
     let letra = generico::letra_rellenada(doc);
     for p in &doc.paginas {
-        for par in Hoja::de(p, &letra).pares_formulario(&vale) {
-            if vale(&par.numero) {
-                casillas.insert(par.numero.parse().unwrap_or_default(), par.importe);
-                leidas += 1;
+        for par in Hoja::de(p, &letra).pares_formulario(&|n| numero(n).is_some()) {
+            if let Some(n) = numero(&par.numero) {
+                casillas.insert(n, par.importe);
+                vistas.insert(n);
             }
         }
     }
-    if leidas == 0 {
+    if vistas.is_empty() {
         return Err(Fallo::SinCasillas);
     }
-    let mal = descuadres::<F>(&casillas);
+    let faltan: Vec<u32> = F::ANCLAS.iter().filter(|n| !vistas.contains(n)).copied().collect();
+    if !faltan.is_empty() {
+        return Err(Fallo::FaltaCasilla { modelo, faltan, vistas: vistas.into_iter().collect() });
+    }
+    let mal = que_no_cuadra::<F>(&casillas);
     if !mal.is_empty() {
         return Err(Fallo::NoCuadra { modelo, casillas: mal });
     }
     let tipo = tipo::<F>(doc, &casillas);
+    if F::TIPO_EN_PORTADA && tipo.is_none() && generico::portada(doc).is_some() {
+        return Err(Fallo::SinTipo(modelo));
+    }
     Ok(FormularioLeido { casillas, tipo, pdf: String::new(), justificante: generico::justificante(doc, modelo.codigo()) })
 }
 
 /// Las casillas que no cuadran con las sumas del propio modelo (para no fiarse de una lectura mal hecha).
 pub fn descuadres<F: Formulario>(c: &Casillas) -> Vec<u32> {
-    F::reglas(c).into_iter().filter(|&(n, debe)| (c.v(n) - debe).abs() > 0.015).map(|(n, _)| n).collect()
+    que_no_cuadra::<F>(c).iter().map(|d| d.casilla).collect()
+}
+
+/// Lo mismo, con lo leído y lo que debería valer cada una.
+fn que_no_cuadra<F: Formulario>(c: &Casillas) -> Vec<Descuadre> {
+    F::reglas(c).into_iter().filter(|&(n, debe)| (c.v(n) - debe).abs() > 0.015).map(|(casilla, debe)| Descuadre { casilla, leido: c.v(casilla), debe }).collect()
 }
 
 /// La suma de unas casillas.
@@ -106,15 +123,14 @@ pub fn suma(c: &Casillas, casillas: &[u32]) -> f64 {
     casillas.iter().map(|&n| c.v(n)).sum()
 }
 
-/// El PDF es de ese modelo y, si se ve el devengo («Ejercicio 2026 Período 3T»), de ese ejercicio y periodo.
+/// El PDF es de ese modelo y su devengo («Ejercicio 2026 Período 3T»), de ese ejercicio y periodo.
 fn comprobar(doc: &Documento, modelo: Modelo, ejercicio: i32, periodo: &Periodo) -> Result<(), Fallo> {
     match generico::modelo(doc) {
         Some(m) if m == modelo.codigo() => {}
         es => return Err(Fallo::OtroModelo { pedido: modelo, es }),
     }
-    if let Some((a, p)) = devengo(doc)
-        && (a != ejercicio || p.as_ref().is_some_and(|p| p != periodo))
-    {
+    let (a, p) = devengo(doc).ok_or(Fallo::SinDevengo(modelo))?;
+    if a != ejercicio || p.as_ref().is_some_and(|p| p != periodo) {
         let pedido = Some(periodo.clone()).filter(|p| *p != Periodo::Anual);
         return Err(Fallo::OtroPeriodo { pedido: (ejercicio, pedido), es: (a, p) });
     }
@@ -198,5 +214,50 @@ mod tests {
         assert_eq!(leer::<M303>(&d, 2024, &p("0A")).unwrap_err().to_string(), "La app lee el 303 trimestral (1T…4T), no el del periodo «0A».");
         assert_eq!(leer::<M390>(&d, 2024, &p("3T")).unwrap_err().to_string(), "El 390 es anual: no tiene periodo «3T».");
         assert_eq!(leer::<M303>(&d, 2024, &p("2T")).unwrap_err().to_string(), "El PDF no es de un modelo 303.");
+    }
+
+    /// Un 303 inventado: «Modelo 303», el devengo y unas casillas con su importe (en otra letra que los números).
+    fn un_303(casillas: &[(&str, &str)], portada: Option<&str>) -> Documento {
+        use crate::hacienda::pdf::{Linea, Pagina};
+        let palabra = |t: &str, x0: f64, top: f64, fuente: &str| Palabra { texto: t.into(), x0, x1: x0 + 20.0, top, bottom: top + 8.0, fuente: fuente.into(), tamano: 8.0 };
+        let linea = |ps: Vec<Palabra>| Linea { top: ps[0].top, bottom: ps[0].bottom, x0: ps[0].x0, x1: 500.0, palabras: ps };
+        let mut lineas = vec![
+            linea(vec![palabra("Modelo", 40.0, 20.0, "Impreso"), palabra("303", 70.0, 20.0, "Impreso")]),
+            linea(vec![palabra("Ejercicio", 40.0, 40.0, "Impreso"), palabra("2025", 90.0, 40.0, "Impreso"), palabra("Período", 120.0, 40.0, "Impreso"), palabra("1T", 160.0, 40.0, "Impreso")]),
+        ];
+        for (i, (n, x)) in casillas.iter().enumerate() {
+            let y = 60.0 + 12.0 * i as f64;
+            lineas.push(linea(vec![palabra("Casilla", 40.0, y, "Impreso"), palabra(n, 300.0, y, "Impreso"), palabra(x, 400.0, y, "Rellena")]));
+        }
+        let mut paginas = vec![Pagina { numero: 1, ancho: 595.0, alto: 842.0, lineas }];
+        if let Some(t) = portada {
+            let l = |t: &str, top: f64| linea(vec![palabra(t, 40.0, top, "Impreso")]);
+            paginas.insert(0, Pagina { numero: 0, ancho: 595.0, alto: 842.0, lineas: vec![l("INFORMACIÓN DE LA PRESENTACIÓN", 10.0), l(t, 30.0)] });
+            for (i, p) in paginas.iter_mut().enumerate() {
+                p.numero = i + 1;
+            }
+        }
+        Documento { paginas }
+    }
+
+    /// Lo que no está no vale 0: sin el devengo, sin su resultado o sin entender la portada, es un fallo.
+    #[test]
+    fn sin_sus_anclas_es_un_fallo() {
+        let p = Periodo::de("1T");
+        let bien = [("27", "21,00"), ("46", "21,00"), ("64", "21,00"), ("65", "100,00"), ("66", "21,00"), ("69", "21,00"), ("71", "21,00"), ("09", "21,00")];
+        let l = leer::<M303>(&un_303(&bien, Some("A INGRESAR")), 2025, &p).unwrap();
+        assert_eq!((l.casillas[&71], l.tipo), (21.0, Some(Tipo::Ingreso)));
+        assert!(leer::<M303>(&un_303(&bien, None), 2025, &p).is_ok(), "sin portada, no hay tipo que entender");
+        // Sin el resultado (71): todo lo demás cuadraría con ceros, pero no se da por bueno.
+        let sin_71: Vec<(&str, &str)> = bien.iter().copied().filter(|(n, _)| *n != "71").collect();
+        let e = leer::<M303>(&un_303(&sin_71, None), 2025, &p).unwrap_err();
+        assert_eq!(e.to_string(), "No encuentro en el PDF la casilla 71, que sale en todos los del 303.");
+        assert_eq!(e.codigo(), "AEAT_303_FALTA_CASILLA");
+        assert!(e.encontrado().contains("09, 27, 46, 64, 65, 66, 69"), "{}", e.encontrado());
+        assert_eq!(leer::<M303>(&un_303(&bien, Some("Gracias")), 2025, &p).unwrap_err(), Fallo::SinTipo(Modelo::M303));
+        // Sin el devengo, no se sabe de qué periodo es.
+        let mut d = un_303(&bien, None);
+        d.paginas[0].lineas.remove(1);
+        assert_eq!(leer::<M303>(&d, 2025, &p).unwrap_err(), Fallo::SinDevengo(Modelo::M303));
     }
 }

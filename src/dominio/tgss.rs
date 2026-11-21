@@ -1,26 +1,35 @@
-//! Lo de la Seguridad Social (`tgss` en datos.json): autónomo (alta, actividad, cuota, recibos, regularizaciones)
+//! Lo de la Seguridad Social (`fuentes/tgss.json`): autónomo (alta, actividad, cuota, recibos, regularizaciones)
 //! y las cotizaciones de las nóminas mes a mes. Es lo que dan los lectores de sus páginas (`tgss`).
 //!
-//! Al leer `datos.json` se acepta lo que haya: un importe que no viene (o no es un número) cuenta como 0, y un texto
-//! que no viene, como vacío.
+//! Al leerlo se acepta lo que escribían las versiones de antes: un importe que no viene, a null o como texto
+//! («1.234,56», «» = 0), y un texto que no viene o a null (vacío) o como número. Lo que no es nada de eso (un
+//! importe «abc», un objeto donde va un texto, un resultado que no existe) no se entiende: el fichero no se usa y se
+//! dice (`almacen::abrir_fuente`), en vez de leerlo como 0 o vacío.
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 fn cero<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-    Ok(match Value::deserialize(d)? {
-        Value::Number(n) => n.as_f64().unwrap_or(0.0),
-        Value::String(s) => crate::dominio::fmt::parse_num(&s),
-        _ => 0.0,
-    })
+    match Value::deserialize(d)? {
+        Value::Number(n) => n.as_f64().ok_or_else(|| D::Error::custom(format!("importe que no se entiende: {n}"))),
+        Value::Null => Ok(0.0),
+        Value::String(s) if s.trim().is_empty() => Ok(0.0),
+        // Como lo escribían las de antes, con su formato («1.234,56»): tiene que tener cifras y nada raro.
+        Value::String(s) if s.trim().trim_end_matches('€').trim().bytes().all(|b| b.is_ascii_digit() || b".,-".contains(&b)) && s.bytes().any(|b| b.is_ascii_digit()) => {
+            Ok(crate::dominio::fmt::parse_num(&s))
+        }
+        v => Err(D::Error::custom(format!("importe que no se entiende: {v}"))),
+    }
 }
 
 fn txt<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    Ok(match Value::deserialize(d)? {
-        Value::String(s) => s,
-        Value::Null => String::new(),
-        v => v.to_string(),
-    })
+    match Value::deserialize(d)? {
+        Value::String(s) => Ok(s),
+        Value::Null => Ok(String::new()),
+        v @ (Value::Number(_) | Value::Bool(_)) => Ok(v.to_string()),
+        v => Err(D::Error::custom(format!("texto que no se entiende: {v}"))),
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -107,7 +116,7 @@ pub struct Recibo {
     pub concepto: String,
     #[serde(deserialize_with = "cero")]
     pub importe: f64,
-    /// Su desglose (en `datos.json`, junto a lo demás: `cc`, `cp`…).
+    /// Su desglose (en el JSON, junto a lo demás: `cc`, `cp`…).
     #[serde(flatten)]
     pub conceptos: Conceptos,
     /// Fecha de cargo en tu cuenta (si consta: mejor `fecha_cargo`).
@@ -201,7 +210,7 @@ pub struct Regularizacion {
     pub pagado: Option<bool>,
 }
 
-/// Lo que sale de una regularización. En `datos.json`: «ingresar», «devolver», «sin» o «» (no se sabe).
+/// Lo que sale de una regularización. En el JSON: «ingresar», «devolver», «sin» o «» (no se sabe).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Resultado {
     Ingresar,
@@ -228,15 +237,16 @@ impl Serialize for Resultado {
     }
 }
 
-/// Lo que no se conoce, `NoSe` (no falla: así se abre cualquier `datos.json`).
+/// «» (o sin poner) es `NoSe`; uno que no existe no se entiende.
 impl<'de> Deserialize<'de> for Resultado {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(match txt(d)?.as_str() {
-            "ingresar" => Resultado::Ingresar,
-            "devolver" => Resultado::Devolver,
-            "sin" => Resultado::SinDiferencias,
-            _ => Resultado::NoSe,
-        })
+        match txt(d)?.as_str() {
+            "ingresar" => Ok(Resultado::Ingresar),
+            "devolver" => Ok(Resultado::Devolver),
+            "sin" => Ok(Resultado::SinDiferencias),
+            "" => Ok(Resultado::NoSe),
+            otro => Err(D::Error::custom(format!("resultado de regularización que no existe: «{otro}»"))),
+        }
     }
 }
 
@@ -314,5 +324,23 @@ impl ConceptoSs {
     /// ¿Es una línea de totales («LIQUIDO DE TOTALES», «LIQUIDO CONTINGENCIAS COMUNES»…)? Repite lo de los demás.
     pub fn es_total(&self) -> bool {
         self.concepto.trim().to_uppercase().starts_with("LIQUIDO")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lo de las versiones de antes se lee; lo que no se entiende, no (en vez de leerlo como 0 o vacío).
+    #[test]
+    fn se_lee_lo_de_antes_y_no_lo_que_no_se_entiende() {
+        let r: Recibo = serde_json::from_str(r#"{"periodo":"2026-10","importe":"1.234,56","cc":null,"cp":"","cese":2,"concepto":null,"cargo":7}"#).unwrap();
+        assert_eq!((r.importe, r.conceptos.cc, r.conceptos.cp, r.conceptos.cese, r.concepto.as_str(), r.cargo.as_str()), (1234.56, 0.0, 0.0, 2.0, "", "7"));
+        for mal in [r#"{"importe":"abc"}"#, r#"{"importe":true}"#, r#"{"importe":[1]}"#, r#"{"concepto":{"a":1}}"#] {
+            assert!(serde_json::from_str::<Recibo>(mal).is_err(), "{mal}");
+        }
+        let g: Regularizacion = serde_json::from_str(r#"{"anio":2024,"resultado":""}"#).unwrap();
+        assert_eq!(g.resultado, Resultado::NoSe);
+        assert!(serde_json::from_str::<Regularizacion>(r#"{"anio":2024,"resultado":"quizá"}"#).is_err());
     }
 }

@@ -1,15 +1,16 @@
-//! Clientes: los que tienes guardados (se guardan solos al emitir una factura). Cada factura lleva su
-//! propia copia de los datos del cliente, así que cambiar o borrar uno aquí no toca ninguna factura.
+//! Tus clientes: los que tienes guardados (se guardan solos al emitir una factura, o se crean al hacerla). No son
+//! una pestaña: se abren desde Facturas (`C`), con el de la factura elegida. Cada factura lleva su propia copia de
+//! los datos del cliente, así que cambiar o borrar uno aquí no toca ninguna factura.
 use crate::dominio::factura::{self, OPERACIONES};
 use crate::dominio::fmt;
 use crate::dominio::{Cliente, Datos, Factura, uid};
-use crate::tui::widgets::{bloque, coincide, derecha, normalizar, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
-use crate::tui::{Ctx, Pantalla};
+use crate::tui::widgets::{coincide, derecha, linea_atajos, normalizar, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
+use crate::tui::Ctx;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
 /* ================= piezas que también usa Facturas ================= */
@@ -131,8 +132,45 @@ fn facturado(d: &Datos, c: &Cliente) -> (usize, f64) {
     factura::emitidas(d).filter(|f| es_del_cliente(f, c)).fold((0, 0.0), |(n, s), f| (n + 1, fmt::r2(s + factura::totales_factura(f).base)))
 }
 
-/* ================= la pantalla ================= */
+/* ================= la lista ================= */
 
+/// Columnas de la lista, en su orden (se quitan las menos importantes si no caben).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Col {
+    Nombre,
+    Nif,
+    Pais,
+    Ciudad,
+    Operacion,
+    Facturas,
+    Facturado,
+}
+
+impl Col {
+    fn titulo(self) -> &'static str {
+        match self {
+            Col::Nombre => "nombre",
+            Col::Nif => "NIF",
+            Col::Pais => "país",
+            Col::Ciudad => "ciudad",
+            Col::Operacion => "operación",
+            Col::Facturas => "facturas",
+            Col::Facturado => "facturado",
+        }
+    }
+}
+
+/// Lo que pasa con una tecla en la lista de clientes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tecla {
+    Usada,
+    /// No es suya: la usa la app (salir, la ayuda…).
+    NoUsada,
+    /// Esc: volver a las facturas.
+    Cerrar,
+}
+
+/// La lista de tus clientes, encima de las facturas.
 #[derive(Default)]
 pub struct Clientes {
     sel: usize,
@@ -148,6 +186,15 @@ pub struct Clientes {
 }
 
 impl Clientes {
+    /// La lista, con el cliente de esa factura elegido (si está guardado).
+    pub fn de(d: &Datos, f: Option<&Factura>) -> Self {
+        let mut c = Clientes::default();
+        if let Some(p) = f.and_then(|f| c.lista(d).iter().position(|&i| es_del_cliente(f, &d.clientes[i]))) {
+            c.sel = p;
+        }
+        c
+    }
+
     /// Índices de los clientes que se ven, por nombre.
     fn lista(&self, d: &Datos) -> Vec<usize> {
         let mut v: Vec<usize> = (0..d.clientes.len())
@@ -216,78 +263,42 @@ impl Clientes {
     }
 }
 
-impl Pantalla for Clientes {
-    fn titulo(&self) -> &'static str {
-        "Clientes"
-    }
-
-    fn al_entrar(&mut self, ctx: &mut Ctx) {
-        let n = self.lista(&ctx.datos).len();
-        self.sel = self.sel.min(n.saturating_sub(1));
-    }
-
-    fn usa_anio(&self) -> bool {
-        false
-    }
-
-    fn capturando(&self) -> bool {
+impl Clientes {
+    /// Escribiendo (buscar, el formulario) o con la ventana de borrar abierta.
+    pub fn capturando(&self) -> bool {
         self.form.is_some() || self.confirmar.is_some() || self.buscando
     }
 
-    fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
+    /// Tus clientes, sin caja, como la lista de facturas: arriba, el título (en el color de la sección), cuántos hay
+    /// y, a la derecha si cabe, la tecla de buscar; debajo, la búsqueda o, si no se busca, que cada factura guarda su
+    /// copia; y la tabla, con la cabecera en gris, las cifras a la derecha (sin «€», como en las facturas) y el elegido
+    /// en el fondo suave de la sección. Si no caben todas las columnas, se quitan las menos importantes.
+    pub fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         let d = &ctx.datos;
         let lista = self.lista(d);
         self.sel = self.sel.min(lista.len().saturating_sub(1));
-        let titulo = if self.busca.valor.is_empty() { format!("Clientes ({})", lista.len()) } else { format!("Clientes ({} con «{}»)", lista.len(), self.busca.valor) };
-        let b = bloque(&titulo);
-        let dentro = b.inner(area);
-        f.render_widget(b, area);
-        let [barra, cuerpo] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(dentro);
-        // Barra de búsqueda
+        let gris = tema::apagado();
+        let cuantos = if self.busca.valor.is_empty() { format!(" ({})", lista.len()) } else { format!(" ({} con «{}»)", lista.len(), self.busca.valor) };
+        let titulo = Line::from(vec![Span::styled("Tus clientes", tema::titulo()), Span::styled(cuantos, gris)]);
+        let [a_tit, a_sub, _, cuerpo] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        let usado = titulo.width();
+        f.render_widget(Paragraph::new(titulo), a_tit);
+        let teclas = linea_atajos(&[("/", "buscar")]);
+        if !self.buscando && usado + 5 + teclas.width() <= area.width as usize {
+            f.render_widget(Paragraph::new(teclas.right_aligned()), a_tit);
+        }
         if self.buscando || !self.busca.valor.is_empty() {
-            let [etq, txt] = Layout::horizontal([Constraint::Length(9), Constraint::Min(1)]).areas(barra);
-            f.render_widget(Paragraph::new(Span::styled(" Buscar: ", tema::apagado())), etq);
-            self.busca.dibujar(f, txt, self.buscando, Style::new().add_modifier(Modifier::BOLD));
+            let [e, t] = Layout::horizontal([Constraint::Length(7), Constraint::Min(1)]).areas(a_sub);
+            f.render_widget(Paragraph::new(Span::styled("buscar", gris)), e);
+            self.busca.dibujar(f, t, self.buscando, Style::new().add_modifier(Modifier::BOLD));
         } else {
-            f.render_widget(Paragraph::new(Span::styled(" Cada factura guarda su copia del cliente: cambiarlo aquí no la toca.", tema::apagado())), barra);
+            f.render_widget(Paragraph::new(Span::styled("Cada factura guarda su copia del cliente: cambiarlo aquí no la toca.", gris)), a_sub);
         }
         if lista.is_empty() {
             let txt = if self.busca.valor.is_empty() { "Aún no tienes clientes. Pulsa n para añadir uno (o se guardan solos al emitir una factura)." } else { "Ningún cliente con ese texto." };
-            f.render_widget(Paragraph::new(Line::styled(format!(" {txt}"), tema::apagado())).wrap(ratatui::widgets::Wrap { trim: true }), cuerpo);
+            f.render_widget(Paragraph::new(Line::styled(txt, gris)).wrap(Wrap { trim: true }), cuerpo);
         } else {
-            let ancho = cuerpo.width;
-            let con_ciudad = ancho >= 100;
-            let mut cab = vec!["Nombre", "NIF", "País"];
-            if con_ciudad {
-                cab.push("Ciudad");
-            }
-            cab.extend(["Operación", "Facturas", "Facturado"]);
-            let mut anchos = vec![Constraint::Fill(1), Constraint::Length(13), Constraint::Length(4)];
-            if con_ciudad {
-                anchos.push(Constraint::Length(16));
-            }
-            anchos.extend([Constraint::Length(14), Constraint::Length(8), Constraint::Length(14)]);
-            let filas: Vec<Row> = lista
-                .iter()
-                .map(|&i| {
-                    let c = &d.clientes[i];
-                    let (n, base) = facturado(d, c);
-                    let mut v = vec![Cell::from(c.nombre.clone()), Cell::from(c.nif.clone()), Cell::from(c.pais.clone())];
-                    if con_ciudad {
-                        v.push(Cell::from(c.ciudad.clone()));
-                    }
-                    v.push(Cell::from(factura::nombre_operacion(&c.operacion)));
-                    v.push(Cell::from(derecha(n.to_string())));
-                    v.push(Cell::from(derecha(fmt::eur(base))));
-                    Row::new(v)
-                })
-                .collect();
-            let cabecera = Row::new(cab.into_iter().enumerate().map(|(i, t)| if i >= 4 + con_ciudad as usize { Cell::from(derecha(t)) } else { Cell::from(t) }))
-                .style(tema::cabecera_tabla());
-            let tabla = Table::new(filas, anchos).header(cabecera).column_spacing(1).row_highlight_style(tema::seleccion());
-            self.tabla.select(Some(self.sel));
-            self.alto = cuerpo.height.saturating_sub(1).max(1) as usize;
-            f.render_stateful_widget(tabla, cuerpo, &mut self.tabla);
+            self.dibujar_tabla(f, cuerpo, d, &lista);
         }
         if let Some((fm, _)) = &self.form {
             fm.dibujar_ventana(f, area, 76);
@@ -297,7 +308,62 @@ impl Pantalla for Clientes {
         }
     }
 
-    fn tecla(&mut self, k: KeyEvent, ctx: &mut Ctx) -> bool {
+    fn dibujar_tabla(&mut self, f: &mut Frame, area: Rect, d: &Datos, lista: &[usize]) {
+        let clientes: Vec<&Cliente> = lista.iter().map(|&i| &d.clientes[i]).collect();
+        let hechas: Vec<(usize, f64)> = clientes.iter().map(|c| facturado(d, c)).collect();
+        let texto = |col: Col, c: &Cliente, (n, base): (usize, f64)| -> String {
+            match col {
+                Col::Nombre => c.nombre.clone(),
+                Col::Nif => c.nif.clone(),
+                Col::Pais => c.pais.clone(),
+                Col::Ciudad => c.ciudad.clone(),
+                Col::Operacion => factura::nombre_operacion(&c.operacion).to_string(),
+                Col::Facturas => n.to_string(),
+                Col::Facturado => fmt::num(base),
+            }
+        };
+        // El ancho de cada columna: lo más largo de ella, o su título; el nombre, 16 como poco; la ciudad, 16 como mucho.
+        let ancho = |col: Col| -> u16 {
+            let largo = clientes.iter().zip(&hechas).map(|(c, h)| texto(col, c, *h).chars().count()).max().unwrap_or(0).max(col.titulo().chars().count()) as u16;
+            match col {
+                Col::Nombre => 16,
+                Col::Ciudad => largo.min(16),
+                _ => largo,
+            }
+        };
+        const ESPACIO: u16 = 2;
+        let mut cols = vec![Col::Nombre, Col::Facturas, Col::Facturado];
+        for c in [Col::Nif, Col::Pais, Col::Operacion, Col::Ciudad] {
+            let ocupa: u16 = cols.iter().chain([&c]).map(|&c| ancho(c) + ESPACIO).sum();
+            if ocupa <= area.width {
+                cols.push(c);
+            }
+        }
+        cols.sort();
+        let numero = |c: Col| matches!(c, Col::Facturas | Col::Facturado);
+        let cabecera = Row::new(cols.iter().map(|&c| if numero(c) { Cell::from(derecha(c.titulo())) } else { Cell::from(c.titulo()) })).style(tema::cabecera_tabla());
+        let filas: Vec<Row> = clientes
+            .iter()
+            .zip(&hechas)
+            .map(|(c, h)| {
+                Row::new(cols.iter().map(|&col| {
+                    let s = texto(col, c, *h);
+                    match col {
+                        _ if numero(col) => Cell::from(derecha(s)),
+                        Col::Operacion => Cell::from(Span::styled(s, tema::apagado())),
+                        _ => Cell::from(s),
+                    }
+                }))
+            })
+            .collect();
+        let anchos = cols.iter().map(|&c| if c == Col::Nombre { Constraint::Fill(1) } else { Constraint::Length(ancho(c)) });
+        let tabla = Table::new(filas, anchos).header(cabecera).column_spacing(ESPACIO).row_highlight_style(tema::seleccion());
+        self.tabla.select(Some(self.sel));
+        self.alto = area.height.saturating_sub(1).max(1) as usize;
+        f.render_stateful_widget(tabla, area, &mut self.tabla);
+    }
+
+    pub fn tecla(&mut self, k: KeyEvent, ctx: &mut Ctx) -> Tecla {
         if let Some((c, i)) = &self.confirmar {
             match c.tecla(k) {
                 Respuesta::Si => {
@@ -309,12 +375,12 @@ impl Pantalla for Clientes {
                             ctx.ok(format!("Cliente «{}» borrado", c.nombre));
                         }
                     }
-                    self.al_entrar(ctx);
+                    self.sel = self.sel.min(self.lista(&ctx.datos).len().saturating_sub(1));
                 }
                 Respuesta::No => self.confirmar = None,
                 Respuesta::Sigue => {}
             }
-            return true;
+            return Tecla::Usada;
         }
         if let Some((fm, _)) = &mut self.form {
             match fm.tecla(k) {
@@ -322,7 +388,7 @@ impl Pantalla for Clientes {
                 Resultado::Cancelar => self.form = None,
                 Resultado::Sigue | Resultado::Cambio => {}
             }
-            return true;
+            return Tecla::Usada;
         }
         let n = self.lista(&ctx.datos).len();
         if self.buscando {
@@ -340,7 +406,7 @@ impl Pantalla for Clientes {
                     }
                 }
             }
-            return true;
+            return Tecla::Usada;
         }
         let pagina = self.alto.max(1) as isize;
         match k.code {
@@ -355,21 +421,22 @@ impl Pantalla for Clientes {
                 self.busca = Entrada::default();
                 self.sel = 0;
             }
+            KeyCode::Esc => return Tecla::Cerrar,
             KeyCode::Char('n') => {
                 let c = Cliente { pais: "ES".into(), operacion: "nacional".into(), ..Default::default() };
                 self.form = Some((formulario_cliente(&c, "Nuevo cliente"), None));
             }
-            KeyCode::Enter | KeyCode::Char('e') => match self.elegido(&ctx.datos) {
+            KeyCode::Enter => match self.elegido(&ctx.datos) {
                 Some(i) => self.form = Some((formulario_cliente(&ctx.datos.clientes[i], "Editar cliente"), Some(i))),
                 None => ctx.info("No hay ningún cliente: pulsa n para añadir uno."),
             },
             KeyCode::Char('d') | KeyCode::Delete => self.pedir_borrar(ctx),
-            _ => return false,
+            _ => return Tecla::NoUsada,
         }
-        true
+        Tecla::Usada
     }
 
-    fn atajos(&self) -> Vec<(&'static str, &'static str)> {
+    pub fn atajos(&self) -> Vec<(&'static str, &'static str)> {
         if self.confirmar.is_some() {
             vec![("Enter/s", "borrar"), ("Esc/n", "cancelar")]
         } else if self.form.is_some() {
@@ -377,7 +444,7 @@ impl Pantalla for Clientes {
         } else if self.buscando {
             vec![("Enter", "aceptar"), ("Esc", "borrar la búsqueda")]
         } else {
-            vec![("↑↓", "mover"), ("n", "nuevo"), ("Enter", "editar"), ("d", "borrar"), ("/", "buscar")]
+            vec![("Esc", "volver"), ("Enter", "editar"), ("n", "nuevo"), ("d", "borrar"), ("/", "buscar")]
         }
     }
 }
@@ -385,6 +452,40 @@ impl Pantalla for Clientes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::prueba::{app_con, cargar, caso, pantalla, teclas};
+    use crate::tui::tests::factura_de_hoy;
+
+    /// Tus clientes se abren desde Facturas (`C`), con el de la factura elegida, sin caja y con la cabecera de las
+    /// columnas en minúscula; se cambian, se crean y se borran como antes, sin tocar ninguna factura.
+    #[test]
+    fn desde_las_facturas() {
+        let dir = caso("a-de-todo");
+        let mut d = cargar(&dir);
+        // La primera factura es de «Zeta Pruebas», el último de tus clientes.
+        factura_de_hoy(&mut d);
+        let zeta = d.facturas.last().unwrap().cliente.clone();
+        d.clientes = vec![Cliente { id: "c-alfa".into(), nombre: "Alfa".into(), ..Default::default() }, Cliente { id: "c-beta".into(), nombre: "Beta".into(), ..Default::default() }, zeta];
+        let nombres = |a: &crate::tui::App| a.ctx.datos.clientes.iter().map(|c| c.nombre.clone()).collect::<Vec<_>>();
+        let mut a = app_con(d, &dir);
+        teclas(&mut a, "a1C");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("Tus clientes (3)") && !p.contains('│') && !p.contains('┌'), "{p}");
+        let cabecera = p.lines().find(|l| l.contains("nombre")).unwrap_or_default();
+        assert!(cabecera.contains("facturas") && cabecera.contains("facturado"), "{p}");
+        assert!(p.lines().any(|l| l.contains("Zeta Pruebas") && l.trim_end().ends_with(" 100,00")), "{p}");
+        // Enter cambia el elegido: el de la factura.
+        teclas(&mut a, "<enter><c-u>Zeta S.L.<c-s>");
+        assert_eq!(nombres(&a), ["Alfa", "Beta", "Zeta S.L."]);
+        assert_eq!(a.ctx.datos.facturas.last().unwrap().cliente.nombre, "Zeta Pruebas", "las facturas no cambian");
+        teclas(&mut a, "nTercero<c-s>");
+        assert_eq!(nombres(&a), ["Alfa", "Beta", "Zeta S.L.", "Tercero"]);
+        // Borra el elegido (el nuevo, que queda elegido).
+        teclas(&mut a, "d<enter>");
+        assert_eq!(nombres(&a), ["Alfa", "Beta", "Zeta S.L."]);
+        teclas(&mut a, "<esc>");
+        assert!(!pantalla(&mut a, 120, 36).contains("Tus clientes"));
+        assert_eq!(a.titulo_activa(), "Facturas");
+    }
 
     #[test]
     fn nif() {

@@ -76,9 +76,9 @@ pub fn pantalla(app: &mut App, w: u16, h: u16) -> String {
     s
 }
 
-/// Lo que se ve sin el menú de la izquierda (en pantallas anchas ocupa las primeras columnas).
+/// Lo que se ve sin el carril de la izquierda (en pantallas anchas ocupa las primeras columnas).
 pub fn sin_menu(s: &str) -> String {
-    s.lines().map(|l| l.chars().skip(super::MENU as usize).collect::<String>()).collect::<Vec<_>>().join("\n")
+    s.lines().map(|l| l.chars().skip(super::CONTENIDO as usize).collect::<String>()).collect::<Vec<_>>().join("\n")
 }
 
 /// Manda teclas a la app. Cada carácter es una tecla, salvo los nombres entre < >:
@@ -134,7 +134,7 @@ pub fn recorrer(dir: &Path) -> BTreeMap<String, String> {
     let datos = cargar(dir);
     let nueva = || app_con(datos.clone(), dir);
     let todas = titulos(&nueva());
-    let sin_izquierda = |s: String, w: u16| if w >= super::ANCHO_MENU { sin_menu(&s) } else { s };
+    let sin_izquierda = |s: String, w: u16| if w >= super::ANCHO_CARRIL { sin_menu(&s) } else { s };
     let pasos: &[(&str, &str)] = &[("abajo y Enter", "<down><down><enter>"), ("Esc", "<esc>"), ("fin y Enter", "<end><enter>"), ("Esc e inicio", "<esc><home>")];
     let mut out = BTreeMap::new();
     for t in &todas {
@@ -149,6 +149,8 @@ pub fn recorrer(dir: &Path) -> BTreeMap<String, String> {
             match *t {
                 "Años" => extra.extend([("g", "g"), ("g otra vez", "g"), ("g y otra", "g"), ("+ desde el detalle", "<enter>+"), ("- desde el detalle", "-"), ("Esc y el anterior", "<esc>-<enter>"), ("Esc tras el anterior", "<esc>")]),
                 "Impuestos" => extra.extend([("← el 4T", "<left>"), ("← el 3T", "<left>"), ("→ → al año", "<right><right>")]),
+                "Facturas" => extra.extend([("C sus clientes", "C"), ("abajo en los clientes", "<down>"), ("Esc a las facturas", "<esc>")]),
+                "Calcula tu sueldo" => extra.extend([("d el detalle", "d"), ("→ el de autónomo", "<right>"), ("d las comunidades", "d"), ("↓ otra comunidad", "<down>")]),
                 _ => {}
             }
             for (i, (nombre, k)) in extra.iter().enumerate() {
@@ -200,59 +202,27 @@ mod tests {
         assert!(pantalla(&mut a, 120, 36).contains(&format!("{hoy} · en curso")), "y vuelve");
     }
 
-    /// Cada entrada del menú lleva su número al lado, y ese número va allí; escribiendo, es un número.
-    #[test]
-    fn un_numero_por_entrada() {
-        // Una autónoma sin nómina: Resumen (1–3) y Autónomo (4–8), sin Empleo; y la calculadora, con la C.
-        let mut a = app();
-        teclas(&mut a, "4");
-        assert_eq!(a.titulo_activa(), "Facturas");
-        let p = pantalla(&mut a, 120, 36);
-        assert!(p.contains("▌ 4  Facturas") && p.contains("  7  Impuestos") && p.contains("  C  Calcula tu sueldo"), "{p}");
-        teclas(&mut a, "7");
-        assert_eq!(a.titulo_activa(), "Impuestos");
-        teclas(&mut a, "9");
-        assert_eq!(a.titulo_activa(), "Impuestos", "no hay novena");
-        teclas(&mut a, "C");
-        assert_eq!(a.titulo_activa(), "Calcula tu sueldo", "las utilidades, con su letra");
-        teclas(&mut a, "2");
-        assert_eq!(a.titulo_activa(), "Años");
-        // Con el menú arriba: las secciones y, debajo, las entradas de la elegida con su tecla.
-        let p = pantalla(&mut a, 80, 24);
-        assert!(p.contains("RESUMEN") && p.contains("2 Años") && p.contains("3 Declaraciones"), "{p}");
-        // Buscando, los números se escriben.
-        teclas(&mut a, "4/1");
-        assert_eq!(a.titulo_activa(), "Facturas");
-        assert!(a.pantalla().capturando());
-        // Las de datos caben en 1–9 y 0 aunque se tengan todas las secciones; las utilidades van aparte.
-        let datos = a.secciones.iter().filter(|s| s.area != super::super::Area::Utilidades).map(|s| s.pantallas.len()).sum::<usize>();
-        assert!(datos <= 10, "{:?}", titulos(&a));
-    }
-
-    /// El año va arriba, en el centro (en grande si hay sitio), salvo en lo que no depende de él: allí `-` no hace nada.
-    /// Arriba también, dónde estás y quién eres (sus iniciales).
+    /// El año va arriba, tras las pestañas («‹ 2026 ›», en su misma fila; también sin carril), salvo en lo que no
+    /// depende de él: allí `-` no hace nada. Arriba también, dónde estás (la pestaña activa, con su raya debajo) y
+    /// quién eres («Hola, …»).
     #[test]
     fn el_anio_arriba_salvo_en_inicio() {
         let hoy = crate::dominio::fmt::anio_actual();
+        let anio = format!("‹ {hoy} ›");
         let mut a = app();
         ir(&mut a, "Facturas");
-        assert!(pantalla(&mut a, 120, 24).lines().next().unwrap().contains(&format!(" {hoy} ")));
         let p = pantalla(&mut a, 120, 36);
-        assert!(p.contains("▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀"), "en grande");
-        assert!(p.contains("AUTÓNOMO") && p.contains(" AP ") && p.contains("Autónoma de Prueba"), "{p}");
+        let filas: Vec<&str> = p.lines().collect();
+        assert!(filas[1].contains("1 Facturas     2 Gastos     3 Impuestos     ") && filas[1].contains(&anio), "{p}");
+        assert!(filas[1].ends_with("Hola, Autónoma de Prueba"), "{p}");
+        assert_eq!(filas[2].chars().position(|c| c == '▀'), Some(super::super::CONTENIDO as usize), "la raya, bajo la activa: {p}");
+        assert!(filas[2].contains(&"▀".repeat("1 Facturas".len())), "{p}");
+        assert!(pantalla(&mut a, 80, 24).lines().nth(1).unwrap().contains(&anio), "sin carril, en la fila de las pestañas");
         ir(&mut a, "Inicio");
-        assert!(!pantalla(&mut a, 120, 36).contains("▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀"));
-        assert!(!pantalla(&mut a, 120, 24).lines().next().unwrap().contains(&hoy.to_string()));
+        assert!(!pantalla(&mut a, 120, 36).contains(&anio));
+        assert!(!pantalla(&mut a, 80, 24).lines().nth(1).unwrap().contains(&hoy.to_string()));
         teclas(&mut a, "-");
         assert_eq!(a.ctx.anio, hoy, "en Inicio, - no cambia el año");
-    }
-
-    #[test]
-    fn iniciales_del_nombre() {
-        assert_eq!(super::super::iniciales("Ana Pérez de la Fuente"), "AF");
-        assert_eq!(super::super::iniciales("Autónoma de Prueba"), "AP");
-        assert_eq!(super::super::iniciales("gesshtor"), "G");
-        assert_eq!(super::super::iniciales(""), "");
     }
 
     /// Ver una pantalla: `PANTALLA=Sueldo TECLAS="<down>" W=120 H=36 DATOS=mock/ana cargo test ver_pantalla --

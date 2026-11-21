@@ -1,19 +1,26 @@
 //! El formulario de un gasto: los campos que se ven dependen de la categoría y del origen, al
-//! cambiar de categoría se ponen su IVA y su origen, y al lado se ve lo que te deduces mientras escribes.
+//! cambiar de categoría se ponen su IVA y su origen, y debajo se ve lo que te deduces mientras escribes.
 use super::gastos::{cifras, frases, Hoja};
 use crate::dominio::gasto::{self, AMORT, CATS, DIETAS, ORIGENES};
 use crate::dominio::fmt;
 use crate::dominio::{Datos, Gasto, Num};
 use crate::dominio::almacen;
-use crate::tui::widgets::{bloque, tema, Eleccion, Formulario, Resultado, Selector, Tipo};
+use crate::tui::widgets::{filas_partidas, tema, titulo_bloque, Eleccion, Formulario, Resultado, Selector, Tipo};
 use crate::tui::Ctx;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
+
+/// Lo más ancho de los campos: más, se lee peor (como el editor de una factura).
+const ANCHO_FORM: u16 = 84;
+/// Ancho de las cifras de lo que te deduces, con puntos guía (como los totales de una factura).
+const ANCHO_CIFRAS: u16 = 44;
+/// Desde este ancho, lo que te deduces va con su desglose: las cifras y, a su lado, las frases.
+const ANCHO_DOS: u16 = 90;
 
 /// Para qué se ha abierto el formulario.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -386,7 +393,7 @@ impl Edicion {
         Ok(g)
     }
 
-    /// El gasto con lo escrito, sin comprobar nada (para el resumen de al lado).
+    /// El gasto con lo escrito, sin comprobar nada (para lo que te deduces, debajo de los campos).
     fn armar(&self) -> Gasto {
         let mut g = self.previo.clone();
         let cat = gasto::cat_de(self.v("categoria"));
@@ -416,36 +423,52 @@ impl Edicion {
         g
     }
 
-    /// Lo que te deduces con lo escrito hasta ahora, en `ancho` columnas. `completo`: con el desglose (si va al lado).
-    fn resumen(&self, d: &Datos, completo: bool, ancho: u16) -> Vec<Line<'static>> {
-        let cat = gasto::cat_de(self.v("categoria"));
-        let mut t = Hoja::new(ancho);
+    /// Lo que te deduces con lo escrito hasta ahora, con puntos guía (el desglose de `cifras`, en `ANCHO_CIFRAS`).
+    fn cifras(&self, d: &Datos) -> Vec<Line<'static>> {
         if self.v("base").trim().is_empty() {
-            t.push(Line::styled("Escribe el importe para ver lo que te deduces.", tema::apagado()));
-        } else {
+            return vec![Line::styled("Escribe el importe para verlo.", tema::apagado())];
+        }
+        let g = self.armar();
+        let mut t = Hoja::new(ANCHO_CIFRAS);
+        cifras(&g, &gasto::gasto_calc(&g, d), &mut t);
+        t.t
+    }
+
+    /// Lo que te deduces en frases (la primera, la principal, en negrita y en BIEN) y, con `ayuda`, la ayuda de la
+    /// categoría.
+    fn frases(&self, d: &Datos, ayuda: bool) -> Vec<Line<'static>> {
+        let mut t: Vec<Line> = Vec::new();
+        if !self.v("base").trim().is_empty() {
             let g = self.armar();
-            let c = gasto::gasto_calc(&g, d);
-            if completo {
-                cifras(&g, &c, &mut t);
-                t.push(Line::from(""));
-            } else {
-                let irpf = if c.amortizable { format!("{} (se amortiza)", fmt::eur(c.coste)) } else { fmt::eur(c.coste) };
-                t.push(Line::from(format!("Pagado {} · IVA deducible {} · IRPF {irpf}", fmt::eur(c.pagado), fmt::eur(c.iva_ded))));
-            }
-            let mut fr = frases(&g, &c, d).into_iter();
+            let mut fr = frases(&g, &gasto::gasto_calc(&g, d), d).into_iter();
             if let Some(p) = fr.next() {
                 t.push(Line::styled(p, Style::new().fg(tema::BIEN).add_modifier(Modifier::BOLD)));
             }
-            for l in fr {
-                t.push(Line::from(l));
-            }
+            t.extend(fr.map(Line::from));
         }
-        let p = cat.ayuda;
-        if completo && !p.is_empty() {
-            t.push(Line::from(""));
+        let p = gasto::cat_de(self.v("categoria")).ayuda;
+        if ayuda && !p.is_empty() {
+            if !t.is_empty() {
+                t.push(Line::from(""));
+            }
             t.push(Line::styled(p.to_string(), tema::apagado().italic()));
         }
-        t.t
+        t
+    }
+
+    /// Lo que te deduces en una fila (cuando no cabe el desglose): lo pagado y, en BIEN, el IVA deducible y el IRPF.
+    fn en_una_fila(&self, d: &Datos) -> Line<'static> {
+        if self.v("base").trim().is_empty() {
+            return Line::styled("Escribe el importe para verlo.", tema::apagado());
+        }
+        let g = self.armar();
+        let c = gasto::gasto_calc(&g, d);
+        let (gris, verde) = (tema::apagado(), Style::new().fg(tema::BIEN));
+        let mut s = vec![Span::styled("pagado ", gris), Span::raw(fmt::eur(c.pagado)), Span::styled(" · IVA deducible ", gris), Span::styled(fmt::eur(c.iva_ded), verde), Span::styled(" · IRPF ", gris), Span::styled(fmt::eur(c.coste), verde)];
+        if c.amortizable {
+            s.push(Span::styled(" (se amortiza)", gris));
+        }
+        Line::from(s)
     }
 
     pub fn atajos(&self) -> Vec<(&'static str, &'static str)> {
@@ -461,30 +484,83 @@ impl Edicion {
         v
     }
 
-    /// El formulario ocupa toda la pestaña; el resumen va al lado si cabe, si no debajo.
+    /// El formulario ocupa toda la pestaña, sin cajas, como el editor de una factura: arriba, qué es («Nuevo gasto»,
+    /// en el color de la sección); los campos (el activo, en el color de la sección); y debajo, «lo que te deduces»: si
+    /// hay sitio, el desglose con puntos guía y, a su lado, las frases y la ayuda de la categoría; si no, en una fila y
+    /// las frases. Si los campos no caben, se desplazan.
     pub fn dibujar(&mut self, f: &mut Frame, area: Rect, d: &Datos) {
-        let ancho = area.width >= 100;
-        // Con el resumen al lado, la ayuda de la categoría ya se ve ahí.
+        let todo = area;
+        let alto_form = self.form.campos.len() as u16 + 3;
+        let cifras = self.cifras(d);
+        // A dos columnas: las cifras a la izquierda y las frases a la derecha, no más anchas de lo que se lee bien.
+        let w_frases = area.width.saturating_sub(ANCHO_CIFRAS + 4).min(60);
+        let frases = self.frases(d, true);
+        let filas_frases = filas(&frases, w_frases);
+        // Lo de debajo de los campos: una fila de aire, su título y las cifras o las frases (lo que ocupe más).
+        let alto_res = 2 + (cifras.len() as u16).max(filas_frases);
+        // Con todos los campos a la vista: los campos van antes que el desglose.
+        let completo = area.width >= ANCHO_DOS && area.height >= 1 + alto_form + alto_res;
+        // Con el desglose debajo, la ayuda de la categoría ya se ve ahí.
         let cat = gasto::cat_de(self.v("categoria"));
-        let ayuda = if ancho { "" } else { cat.ayuda };
+        let ayuda = if completo { "" } else { cat.ayuda };
         if let Some(c) = self.form.campos.iter_mut().find(|c| c.clave == "categoria") {
             c.ayuda = format!("Enter o escribe para buscar en la lista. {ayuda}").trim_end().to_string();
         }
-        let [zf, zr] = if ancho {
-            Layout::horizontal([Constraint::Min(50), Constraint::Length(44)]).areas(area)
+        let titulo = Paragraph::new(Line::styled(self.form.titulo.clone(), tema::titulo()));
+        let w_form = area.width.min(ANCHO_FORM);
+        if completo {
+            // Con una fila de aire bajo el título, si cabe.
+            let aire = u16::from(area.height >= 2 + alto_form + alto_res);
+            let [a_t, _, a_f, _, a_tit, a_cif, _] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(aire),
+                Constraint::Length(alto_form),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(alto_res - 2),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            f.render_widget(titulo, a_t);
+            self.form.dibujar(f, Rect { width: w_form, ..a_f });
+            f.render_widget(Paragraph::new(titulo_bloque("lo que te deduces")), a_tit);
+            let [a_c, _, a_fr] = Layout::horizontal([Constraint::Length(ANCHO_CIFRAS), Constraint::Length(4), Constraint::Length(w_frases)]).areas(a_cif);
+            f.render_widget(Paragraph::new(cifras), a_c);
+            f.render_widget(Paragraph::new(frases).wrap(Wrap { trim: false }), a_fr);
         } else {
-            Layout::vertical([Constraint::Min(6), Constraint::Length(7)]).areas(area)
-        };
-        let b = bloque(&self.form.titulo);
-        let dentro = b.inner(zf);
-        f.render_widget(b, zf);
-        self.form.dibujar(f, dentro);
-        let resumen = Paragraph::new(self.resumen(d, ancho, zr.width.saturating_sub(2))).wrap(Wrap { trim: false }).block(bloque("Lo que te deduces"));
-        f.render_widget(resumen, zr);
+            // En una fila y las frases (sin la ayuda, que va en la del campo): lo que sobre bajo los campos o, si no
+            // caben, cinco filas (y los campos se desplazan).
+            let w = w_form.max(1);
+            let mut t = vec![self.en_una_fila(d)];
+            t.extend(self.frases(d, false));
+            let sobra = area.height.saturating_sub(1 + alto_form + 2);
+            let alto_t = filas(&t, w).min(sobra.max(5)).min(area.height.saturating_sub(1 + 4 + 2));
+            let alto_f = alto_form.min(area.height.saturating_sub(1 + 2 + alto_t));
+            let aire = u16::from(area.height >= 1 + 1 + alto_form + 2 + alto_t);
+            let [a_t, _, a_f, _, a_tit, a_r, _] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(aire),
+                Constraint::Length(alto_f),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(alto_t),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            f.render_widget(titulo, a_t);
+            self.form.dibujar(f, Rect { width: w_form, ..a_f });
+            f.render_widget(Paragraph::new(titulo_bloque("lo que te deduces")), a_tit);
+            f.render_widget(Paragraph::new(t).wrap(Wrap { trim: false }), Rect { width: w, ..a_r });
+        }
         if let Some((_, s)) = &mut self.lista {
-            s.dibujar(f, area);
+            s.dibujar(f, todo);
         }
     }
+}
+
+/// Las filas que ocupan unas líneas partidas por las palabras en `ancho` columnas.
+fn filas(t: &[Line], ancho: u16) -> u16 {
+    t.iter().map(|l| filas_partidas(&l.spans.iter().map(|s| s.content.as_ref()).collect::<String>(), ancho as usize)).sum()
 }
 
 /// Los ficheros de documentos/ para elegir uno (el más nuevo arriba), con el gasto o la factura que ya lo usa.

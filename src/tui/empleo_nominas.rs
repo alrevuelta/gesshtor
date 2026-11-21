@@ -5,17 +5,14 @@ use super::empleo::{col, col_der, parrafo, pct1, tabla, Col, FilaT, Tabla, RESTO
 use crate::dominio::{uid, Datos, Nomina};
 use crate::dominio::fmt::{self, r2};
 use crate::informe::empleo::nominas_anio;
-use crate::tui::widgets::{bloque, tema, Confirmar, Formulario, Respuesta, Resultado};
+use crate::tui::widgets::{guia, linea_atajos, tema, Confirmar, Formulario, Respuesta, Resultado};
 use crate::tui::{Ctx, Pantalla};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
-
-/// Ancho de las columnas de importes.
-const COL: u16 = 12;
 
 #[derive(Default)]
 pub struct Nominas {
@@ -126,6 +123,11 @@ pub(super) fn guardar(fm: &mut Formulario, id: Option<&str>, anio: i32, ctx: &mu
 }
 
 impl Nominas {
+    /// ¿La nómina elegida tiene su documento? (si se metió arrastrándola)
+    fn con_doc(&self) -> bool {
+        self.lista.get(self.sel).is_some_and(|n| !n.doc.is_empty())
+    }
+
     fn al_dia(&mut self, ctx: &Ctx) {
         let clave = (ctx.generacion, ctx.anio);
         if self.clave == Some(clave) {
@@ -170,62 +172,115 @@ impl Nominas {
         self.al_dia(ctx);
     }
 
+    /// Como Facturas, sin caja: arriba, el año y cuántas; debajo, lo del año con puntos guía (el bruto, lo de en
+    /// especie si hay, el IRPF con su % y la Seguridad Social); y la lista, con la cabecera en gris, las cifras a la
+    /// derecha (sin «€») y la elegida en el fondo suave de la sección. Si no caben todas las columnas, se quitan
+    /// las menos importantes (lo de en especie, luego la empresa).
     fn dibujar_lista(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         let y = ctx.anio;
         let n = self.lista.len();
-        let titulo = format!("Tus nóminas de {y}");
-        let b = bloque(&titulo);
+        let gris = tema::apagado();
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
+        let cuantas = match n {
+            0 => String::new(),
+            1 => " · 1 nómina".into(),
+            n => format!(" · {n} nóminas"),
+        };
+        let mut arriba = vec![Line::from(vec![Span::styled(format!("Tus nóminas de {y}"), negrita), Span::styled(cuantas, gris)]), Line::from("")];
         if n == 0 {
-            let w = area.width.saturating_sub(2) as usize;
-            let mut t = vec![Line::from(format!("Todavía no has apuntado nóminas de {y}.")), Line::from("")];
-            t.extend(parrafo("Con ellas ves tu sueldo mes a mes y si te retienen bien. Copia de cada nómina el bruto, el IRPF y la Seguridad Social.", w, tema::apagado()));
-            t.push(Line::from(""));
-            t.push(Line::styled("Pulsa n para apuntar una.", Style::new().fg(tema::ACENTO)));
-            f.render_widget(Paragraph::new(t).wrap(Wrap { trim: true }).block(b), area);
+            arriba.push(Line::from(format!("Todavía no has apuntado nóminas de {y}.")));
+            arriba.push(Line::from(""));
+            arriba.extend(parrafo("Con ellas ves tu sueldo mes a mes y si te retienen bien. Copia de cada nómina el bruto, el IRPF y la Seguridad Social.", area.width as usize, gris));
+            arriba.push(Line::from(""));
+            arriba.push(Line::styled("Pulsa n para apuntar una.", Style::new().fg(tema::acento())));
+            f.render_widget(Paragraph::new(arriba).wrap(Wrap { trim: false }), area);
             return;
         }
-        let ancho = b.inner(area).width;
-        let con_especie = ancho >= 84 && self.lista.iter().any(|n| n.especie.abs() > DIF);
-        let con_empresa = ancho >= 64;
-        let importe = |x: f64| Line::from(fmt::eur(x));
-        let celdas = |mes: Line<'static>, empresa: &str, bruto: f64, especie: f64, irpf: f64, ss: f64| {
-            let mut c = vec![mes];
-            if con_empresa {
-                c.push(Line::from(empresa.to_string()));
-            }
-            c.push(importe(bruto));
-            if con_especie {
-                c.push(if especie.abs() > DIF { importe(especie) } else { Line::styled("—", tema::apagado()) });
-            }
-            let pct = if bruto.abs() > DIF { pct1(irpf / bruto * 100.0) } else { "—".into() };
-            c.extend([importe(irpf), Line::styled(pct, tema::apagado()), importe(ss)]);
-            FilaT::new(c)
-        };
-        let mut filas: Vec<FilaT> = self.lista.iter().map(|n| celdas(Line::from(mes(n.mes)), &n.empresa, r2(n.bruto()), n.especie, n.retenciones, n.ss)).collect();
-        if n > 1 {
-            let suma = |f: fn(&Nomina) -> f64| r2(self.lista.iter().map(f).sum());
-            let total = celdas(Line::from("Total"), "", suma(|n| n.bruto()), suma(|n| n.especie), suma(|n| n.retenciones), suma(|n| n.ss));
-            filas.push(total.estilo(Style::new().add_modifier(Modifier::BOLD)));
+        // Lo del año, con las cifras acabando en la misma columna.
+        let suma = |f: fn(&Nomina) -> f64| r2(self.lista.iter().map(f).sum());
+        let (bruto, especie, irpf, ss) = (suma(|n| n.bruto()), suma(|n| n.especie), suma(|n| n.retenciones), suma(|n| n.ss));
+        let pct = |irpf: f64, bruto: f64| if bruto.abs() > DIF { pct1(irpf / bruto * 100.0) } else { "—".into() };
+        let mut totales = vec![("bruto", bruto, String::new())];
+        if especie.abs() > DIF {
+            totales.push(("de él, en especie", especie, String::new()));
         }
-        let mut cols: Vec<Col> = vec![col(11)];
-        let mut cab = vec!["Mes"];
+        totales.push(("IRPF", irpf, format!("{} del bruto", pct(irpf, bruto))));
+        totales.push(("Seguridad Social", ss, String::new()));
+        let fin = totales.iter().map(|(e, x, _)| e.chars().count() + fmt::eur(*x).chars().count() + 6).max().unwrap_or(0) as u16;
+        for (e, x, nota) in totales {
+            let mut l = guia(Span::raw(e), fmt::eur(x), Style::new(), fin);
+            if !nota.is_empty() {
+                l.push_span(Span::styled(format!("   {nota}"), gris));
+            }
+            arriba.push(l);
+        }
+        arriba.push(Line::from(""));
+        let alto = (arriba.len() as u16).min(area.height.saturating_sub(3));
+        let [za, zt] = Layout::vertical([Constraint::Length(alto), Constraint::Min(0)]).areas(area);
+        f.render_widget(Paragraph::new(arriba), za);
+        // La nómina en PDF o en foto (▤), si la elegida la tiene: abajo no siempre cabe la tecla.
+        if self.con_doc() {
+            let usado = format!("Tus nóminas de {y}{}", if n == 1 { " · 1 nómina".to_string() } else { format!(" · {n} nóminas") }).chars().count();
+            let tecla = linea_atajos(&[("o", "ver la nómina ▤")]);
+            if usado + 5 + tecla.width() <= za.width as usize {
+                f.render_widget(Paragraph::new(tecla.right_aligned()), Rect { height: za.height.min(1), ..za });
+            }
+        }
+
+        // Las columnas: el ancho de cada una, lo más largo de ella o su título.
+        let largo = |v: Vec<String>, titulo: &str| v.iter().map(|s| s.chars().count()).chain([titulo.chars().count()]).max().unwrap_or(0) as u16;
+        let num = |f: fn(&Nomina) -> f64| self.lista.iter().map(|n| fmt::num(r2(f(n)))).collect::<Vec<_>>();
+        let (w_bruto, w_especie, w_irpf, w_ss) = (largo(num(|n| n.bruto()), "bruto"), largo(num(|n| n.especie), "en especie"), largo(num(|n| n.retenciones), "IRPF"), largo(num(|n| n.ss), "seg. social"));
+        let w_pct = largo(self.lista.iter().map(|n| pct(n.retenciones, n.bruto())).collect(), "%");
+        let con_doc = self.lista.iter().any(|n| !n.doc.is_empty());
+        let fijo = |cols: &[u16]| cols.iter().map(|w| w + 2).sum::<u16>();
+        let mut base = vec![10, w_bruto, w_irpf, w_pct, w_ss];
+        if con_doc {
+            base.push(1);
+        }
+        // La empresa, con 14 como poco; lo de en especie, si lo hay y aún cabe.
+        let con_empresa = fijo(&base) + 14 <= zt.width;
+        let con_especie = self.lista.iter().any(|n| n.especie.abs() > DIF) && fijo(&base) + w_especie + 2 + if con_empresa { 14 } else { 0 } <= zt.width;
+        let importe = |x: f64| Line::from(fmt::num(x));
+        let filas: Vec<FilaT> = self
+            .lista
+            .iter()
+            .map(|n| {
+                let mut c = vec![Line::from(mes(n.mes))];
+                if con_empresa {
+                    c.push(Line::from(n.empresa.clone()));
+                }
+                c.push(importe(r2(n.bruto())));
+                if con_especie {
+                    c.push(if n.especie.abs() > DIF { importe(n.especie) } else { Line::styled("—", gris) });
+                }
+                c.extend([importe(n.retenciones), Line::styled(pct(n.retenciones, n.bruto()), gris), importe(n.ss)]);
+                if con_doc {
+                    c.push(Line::styled(if n.doc.is_empty() { "" } else { "▤" }, gris));
+                }
+                FilaT::new(c)
+            })
+            .collect();
+        // Sin la columna de empresa, la del mes se lleva lo que sobre.
+        let mut cols: Vec<Col> = vec![if con_empresa { col(10) } else { RESTO }];
+        let mut cab = vec!["mes"];
         if con_empresa {
             cols.push(RESTO);
-            cab.push("Empresa");
+            cab.push("empresa");
         }
-        cols.push(col_der(COL + 1));
-        cab.push("Bruto");
+        cols.push(col_der(w_bruto));
+        cab.push("bruto");
         if con_especie {
-            cols.push(col_der(COL));
-            cab.push("En especie");
+            cols.push(col_der(w_especie));
+            cab.push("en especie");
         }
-        cols.extend([col_der(COL), col_der(7), col_der(COL)]);
-        cab.extend(["IRPF", "%", "Seg. Social"]);
-        // Sin la columna de empresa, la del mes se lleva lo que sobre.
-        if !con_empresa {
-            cols[0] = RESTO;
+        cols.extend([col_der(w_irpf), col_der(w_pct), col_der(w_ss)]);
+        cab.extend(["IRPF", "%", "seg. social"]);
+        if con_doc {
+            cols.push(col(1));
+            cab.push("");
         }
-        tabla(f, area, b, &Tabla { cols: &cols, cab: &cab, filas }, Some(self.sel), &mut self.desde);
+        tabla(f, zt, &Tabla { cols: &cols, cab: &cab, filas }, Some(self.sel), &mut self.desde);
     }
 }
 
@@ -293,8 +348,10 @@ impl Pantalla for Nominas {
             KeyCode::Home => self.sel = 0,
             KeyCode::End => self.sel = n.saturating_sub(1),
             KeyCode::Char('n') => self.nueva(ctx),
-            KeyCode::Enter | KeyCode::Char('e') if n > 0 => self.cambiar(ctx),
+            KeyCode::Enter if n > 0 => self.cambiar(ctx),
             KeyCode::Char('d') if n > 0 => self.preguntar_borrar(),
+            // La nómina en PDF o en foto, si se metió arrastrándola.
+            KeyCode::Char('o') if self.con_doc() => ctx.abrir_doc(&self.lista[self.sel].doc),
             _ => return false,
         }
         true
@@ -305,6 +362,7 @@ impl Pantalla for Nominas {
             Modo::Form(..) => vec![("Tab ↓", "siguiente"), ("← →", "mes"), ("Ctrl+S", "guardar"), ("Esc", "cancelar")],
             Modo::Borrar(..) => vec![("Enter/s", "sí"), ("Esc/n", "no")],
             Modo::Lista if self.lista.is_empty() => vec![("n", "nueva")],
+            Modo::Lista if self.con_doc() => vec![("n", "nueva"), ("Enter", "cambiar"), ("d", "borrar"), ("o", "ver la nómina")],
             Modo::Lista => vec![("n", "nueva"), ("Enter", "cambiar"), ("d", "borrar")],
         }
     }

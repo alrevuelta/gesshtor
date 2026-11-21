@@ -25,7 +25,7 @@ const URL_CONSULTA: &str = "https://www1.agenciatributaria.gob.es/wlpl/SCEJ-MANT
 /// El justificante en PDF de cualquier declaración por su CSV (`?COMPLETA=SI&ORIGEN=D&CSV=…`).
 const URL_JUSTIFICANTE: &str = "https://www2.agenciatributaria.gob.es/wlpl/inwinvoc/es.aeat.dit.adu.eeca.catalogo.VisualizaSc";
 const NO_ACEPTADO: &str = "Hacienda no ha aceptado tu certificado.";
-/// Peticiones a la vez a Hacienda (como la web).
+/// Peticiones a la vez a Hacienda.
 const HILOS: usize = 3;
 
 /// Lo presentado de cada año pedido, o por qué no se ha podido saber.
@@ -190,10 +190,11 @@ fn interpretar(r: &Respuesta, modelo: &str, anio: i32) -> Result<Vec<Decl>, Fall
     let Some(raiz) = doc.todos().into_iter().find(|n| n.nombre == "servicioConsultasDirectas") else {
         return Err(Fallo::Hacienda(format!("Respuesta inesperada de Hacienda (HTTP {}).", r.codigo)));
     };
-    let (mut decl, mut error) = (Vec::new(), String::new());
+    let (mut decl, mut error, mut respuestas) = (Vec::new(), String::new(), 0);
     for n in raiz.todos() {
         match n.nombre.as_str() {
             "respuestaCorrecta" => {
+                respuestas += 1;
                 // Lo de otro modelo no se guarda aquí (el 036 viene como «C36»).
                 if !n.hijo("modelo").is_empty() && codigo(n.hijo("modelo")) != modelo {
                     continue;
@@ -212,6 +213,10 @@ fn interpretar(r: &Respuesta, modelo: &str, anio: i32) -> Result<Vec<Decl>, Fall
             _ => {}
         }
     }
+    // «No ha presentado» lo dice Hacienda con su mensaje: sin respuestas ni mensaje, es que su respuesta ha cambiado.
+    if respuestas == 0 && error.is_empty() {
+        return Err(Fallo::Hacienda("Hacienda ha contestado sin declaraciones y sin decir que no las hay: puede que haya cambiado su respuesta (src/hacienda/consulta.rs · interpretar).".into()));
+    }
     if !error.is_empty() && decl.is_empty() {
         return if sin_resultados(&error) {
             Ok(Vec::new())
@@ -220,6 +225,10 @@ fn interpretar(r: &Respuesta, modelo: &str, anio: i32) -> Result<Vec<Decl>, Fall
         } else {
             Err(Fallo::Hacienda(format!("Hacienda dice: {error}")))
         };
+    }
+    // Sin su CSV no se puede bajar su PDF, y sin su periodo no se sabe de qué es: es que ha cambiado la respuesta.
+    if let Some(d) = decl.iter().find(|d| d.csv.is_empty() || d.periodo.is_empty()) {
+        return Err(Fallo::Hacienda(format!("Hacienda da una declaración del {modelo} sin su CSV o su periodo (csv «{}», periodo «{}»): puede que haya cambiado su respuesta (src/hacienda/consulta.rs · interpretar).", d.csv, d.periodo)));
     }
     decl.sort_by(|a, b| a.fecha.cmp(&b.fecha));
     Ok(decl)
@@ -360,7 +369,12 @@ mod pruebas {
     }
 
     fn cert_de_prueba() -> Certificado {
-        Certificado::abrir(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pruebas/prueba.p12"), "prueba").unwrap()
+        Certificado::de_prueba("00000000T", "ANA", "PRUEBA")
+    }
+
+    /// Hacienda sin certificado: sirve para todo lo que no sale a la red.
+    fn hacienda_de_prueba() -> Hacienda {
+        Hacienda { cli: Cliente::new(None, DOMINIOS_AEAT), nif: "00000000T".into(), nombre: "PRUEBA ANA".into() }
     }
 
     /// Lo que dice Hacienda de cada modelo de 2024 en los ejemplos.
@@ -434,6 +448,12 @@ mod pruebas {
         let r = interpretar(&respuesta(b"<html><body>Servicio no disponible</body></html>".to_vec()), "303", 2024);
         assert_eq!(r, Err(Fallo::Hacienda("Respuesta inesperada de Hacienda (HTTP 200).".into())));
         assert!(matches!(interpretar(&respuesta(Vec::new()), "303", 2024), Err(Fallo::Hacienda(_))));
+        // Una sin CSV no se podría bajar: no se da por buena.
+        let x = "<servicioConsultasDirectas><respuestaCorrecta><modelo>303</modelo><periodo>1T</periodo><codigoSeguro>X</codigoSeguro></respuestaCorrecta></servicioConsultasDirectas>";
+        assert!(matches!(interpretar(&respuesta(x.into()), "303", 2024), Err(Fallo::Hacienda(e)) if e.contains("sin su CSV")));
+        // Sin declaraciones ni mensaje no es «nada presentado» (lo dice con su mensaje): ha cambiado algo.
+        let r = interpretar(&respuesta(b"<servicioConsultasDirectas><otraCosa/></servicioConsultasDirectas>".to_vec()), "303", 2024);
+        assert!(matches!(&r, Err(Fallo::Hacienda(e)) if e.contains("sin declaraciones")), "{r:?}");
         // Con espacio de nombres, saltos de línea y sin el ejercicio.
         let x = "<?xml version='1.0'?>\n<ns2:servicioConsultasDirectas xmlns:ns2='urn:x'>\n <ns2:respuestaCorrecta>\n  <ns2:modelo>130</ns2:modelo>\n  <ns2:periodo>2T</ns2:periodo>\n  <ns2:csv>ABCDEFGH12345678</ns2:csv>\n </ns2:respuestaCorrecta>\n</ns2:servicioConsultasDirectas>";
         let v = interpretar(&respuesta(x.into()), "130", 2023).unwrap();
@@ -468,10 +488,10 @@ mod pruebas {
         assert_eq!(h.errores.keys().map(String::as_str).collect::<Vec<_>>(), ["390"]);
         assert_eq!(h.errores["390"], Error { fecha: fecha.into(), error: "www1.agenciatributaria.gob.es no contesta (se ha agotado el tiempo).".into() });
 
-        // Lo lee la app (también tras guardarlo y volverlo a cargar).
+        // Lo lee la app (también tras guardarlo y volverlo a cargar, como en `fuentes/`).
+        let h: Consulta = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
         let mut d = Datos::default();
         d.hacienda.insert(2024, h);
-        let d: Datos = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         let v = hacienda::declaraciones(&d, 2024);
         assert_eq!(v.len(), 6);
         let t3 = hacienda::presentada(&d, 2024, 3, hacienda::Modelo::M303).unwrap();
@@ -580,23 +600,9 @@ mod pruebas {
         let j = dir.join("justificantes");
         std::fs::create_dir_all(&j).unwrap();
         std::fs::write(j.join("2024_3T_303_PRUEBA303A3T0001.pdf"), b"%PDF-1.4").unwrap();
-        let aeat = Hacienda::new(&cert_de_prueba());
+        let aeat = hacienda_de_prueba();
         assert_eq!(aeat.pdf(&dir, "303", 2024, "3T", "PRUEBA303A3T0001"), Ok(j.join("2024_3T_303_PRUEBA303A3T0001.pdf")));
         assert_eq!(aeat.pdf(&dir, "303", 2024, "3T", "X&Y"), Err("Datos del justificante no válidos.".into()));
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Con internet: `cargo test hacienda::consulta -- --ignored --nocapture`. El certificado de prueba no es de la FNMT:
-    /// Hacienda acepta la conexión y contesta que no lo admite. Prueba la ida y vuelta de verdad.
-    #[test]
-    #[ignore]
-    fn hacienda_de_verdad_con_certificado_de_prueba() {
-        let aeat = Hacienda::new(&cert_de_prueba());
-        assert_eq!(aeat.presentado(2024, MODELOS), Err(NO_ACEPTADO.to_string()));
-        let dir = std::env::temp_dir().join(format!("gesshtor-aeat-red-{}", std::process::id()));
-        let r = aeat.pdf(&dir, "303", 2024, "3T", "PRUEBA303A3T0001");
-        println!("PDF: {r:?}");
-        assert!(r.is_err());
-        assert!(!dir.join("justificantes").exists());
     }
 }

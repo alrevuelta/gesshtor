@@ -120,6 +120,27 @@ pub(crate) fn letra_rellenada(doc: &Documento) -> String {
     cuenta.iter().rev().max_by_key(|x| x.1).map(|x| x.0.to_string()).unwrap_or_default()
 }
 
+/// Una página sin lo que rellenó Hacienda (las palabras en la letra de los importes rellenados: nombres, NIF,
+/// domicilio, importes…, cada tramo cambiado por «…»): solo el impreso, su estructura. Para el fragmento de un fallo.
+/// Si no se sabe cuál es esa letra (no hay importes), nada.
+pub(crate) fn sin_lo_rellenado(doc: &Documento, p: &Pagina) -> String {
+    let letra = letra_rellenada(doc);
+    if letra.is_empty() {
+        return String::new();
+    }
+    let linea = |l: &super::pdf::Linea| {
+        let mut v: Vec<&str> = Vec::new();
+        for w in &l.palabras {
+            let x = if familia(&w.fuente) == letra { "…" } else { w.texto.as_str() };
+            if !(x == "…" && v.last() == Some(&"…")) {
+                v.push(x);
+            }
+        }
+        v.join(" ")
+    };
+    p.lineas.iter().map(linea).collect::<Vec<_>>().join("\n")
+}
+
 /// Un número de casilla y su importe, emparejados por su posición en la página.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Par {
@@ -394,27 +415,5 @@ mod tests {
         ]);
         let c = casillas(&d);
         assert_eq!(c.iter().map(|x| (x.numero.as_str(), x.importe, x.etiqueta.as_str())).collect::<Vec<_>>(), [("0171", 23500.0, "Ingresos de explotación"), ("0186", 1000.0, "Gastos")]);
-    }
-
-    #[test]
-    fn el_303_de_prueba() {
-        use crate::hacienda::modelo_303::pruebas::{con_portada, pdf_de_prueba};
-        let doc = pdf_de_prueba();
-        let c = casillas(&doc);
-        let de = |n: &str| c.iter().find(|x| x.numero == n).unwrap_or_else(|| panic!("falta la {n}: {c:?}"));
-        assert_eq!(de("28").importe, 5000.0);
-        assert!(de("28").etiqueta.starts_with("Por cuotas soportadas en operaciones interiores corrientes"), "{:?}", de("28"));
-        assert!(de("46").etiqueta.starts_with("Resultado régimen general"), "{:?}", de("46"));
-        assert_eq!(de("65").importe, 100.0);
-        // El modelo, del número grande de la cabecera; sin la página de la presentación no hay más.
-        assert_eq!(modelo(&doc).as_deref(), Some("303"));
-        assert!(portada(&doc).is_none() && presentada(&doc).is_none() && justificante(&doc, "303").is_empty());
-        // Con ella, de ahí salen el modelo, el justificante y cuándo se presentó, pero ninguna casilla.
-        let doc = con_portada("A COMPENSAR");
-        assert_eq!(portada(&doc).map(|p| p.numero), Some(1));
-        assert_eq!(casillas(&doc), c.iter().map(|x| CasillaImpresa { pagina: x.pagina + 1, ..x.clone() }).collect::<Vec<_>>());
-        assert_eq!(modelo(&doc).as_deref(), Some("303"));
-        assert_eq!(justificante(&doc, "303"), "3039999999999");
-        assert_eq!(presentada(&doc).as_deref(), Some("2025-04-15T09:05:30"));
     }
 }

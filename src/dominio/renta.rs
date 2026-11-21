@@ -1,5 +1,5 @@
 //! Una Renta (modelo 100) leída del PDF de Hacienda: las casillas y lo que significan, por bloques.
-//! Es lo que sale del lector (`hacienda::modelo_100`), lo que se guarda en `cache.json` y lo que usan los informes.
+//! Es lo que sale del lector (`hacienda::modelo_100`), lo que se guarda en `fuentes/` y lo que usan los informes.
 //! Cada bloque solo está si el lector lo encontró y cuadran sus sumas; si no, `None`.
 use serde::{Deserialize, Serialize};
 

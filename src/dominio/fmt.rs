@@ -1,4 +1,5 @@
-//! Números, importes y fechas en español (es-ES; fechas ISO «YYYY-MM-DD» en hora local).
+//! Números, importes y fechas en español (es-ES; fechas ISO «YYYY-MM-DD» en hora local). Y el base64, que usan
+//! el portapapeles, la API de Anthropic y el certificado.
 use chrono::{Datelike, Duration, Local, NaiveDate};
 
 /// Redondeo comercial a céntimos (mitad hacia arriba, simétrico en negativos).
@@ -209,9 +210,30 @@ pub fn dmy(s: &str) -> String {
     }
 }
 
+/// Base64 estándar, con relleno (lo que piden OSC 52, la API de Anthropic y el PEM).
+pub fn base64(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
+    for t in b.chunks(3) {
+        let n = (u32::from(t[0]) << 16) | (u32::from(*t.get(1).unwrap_or(&0)) << 8) | u32::from(*t.get(2).unwrap_or(&0));
+        for (i, desplazar) in [18, 12, 6, 0].into_iter().enumerate() {
+            s.push(if i <= t.len() { A[(n >> desplazar) as usize & 63] as char } else { '=' });
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_estandar() {
+        for (a, b) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("foobar", "Zm9vYmFy"), ("hola", "aG9sYQ=="), ("ñ€", "w7Higqw=")] {
+            assert_eq!(base64(a.as_bytes()), b, "{a}");
+        }
+        assert_eq!(base64(&[0xff, 0xfe, 0x00]), "//4A");
+    }
 
     #[test]
     fn meses() {

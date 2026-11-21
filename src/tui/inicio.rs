@@ -1,19 +1,21 @@
-//! «Inicio»: el saludo y qué eres ahora (por cuenta ajena, por tu cuenta o las dos cosas) y, en tarjetas, tu
-//! certificado (y cuándo caduca), tu última nómina, tu alta, actividad y cuota de autónomo, el próximo plazo y lo
-//! último presentado. Abajo, la carpeta de tus datos y la versión de la app (con su commit).
-use crate::dominio::fmt::{eur, fecha_corta};
-use crate::dominio::fmt::nombre_mes;
+//! «Inicio»: cómo va el año hasta hoy y qué eres ahora (por cuenta ajena, por tu cuenta o las dos cosas). Lo que te
+//! queda va en una banda, con lo generado encima y debajo a dónde fue lo demás (Seguridad Social, IRPF y gastos),
+//! con su barra fina. Al lado, el próximo plazo (en su cajita) y lo último presentado. Debajo, de más a menos
+//! importante: lo que no se ha podido traer, tu alta, actividad y cuota de autónomo, tu última nómina y tu
+//! certificado (y cuándo caduca, con lo traído la última vez), que va antes si caduca pronto. Abajo del todo, la
+//! carpeta de tus datos y la versión de la app (con su commit). Sin cajas: se separa con aire. Si no cabe todo, se
+//! quita el aire y, si ni así, lo menos importante.
+use crate::dominio::fmt::{self, eur, fecha_corta, nombre_mes, DIF};
 use crate::informe::inicio::{inicio, Inicio as Datos};
 use crate::informe::reparto::{reparto, Reparto};
-use crate::dominio::fmt;
-use crate::tui::texto::{cuando, envolver, frase, ruta_corta};
-use crate::tui::widgets::{bloque, kpi, tema};
+use crate::tui::texto::{cuando, envolver, frase, partir, ruta_corta};
+use crate::tui::widgets::{banda, barra, cajita_plazo, guia, muestra, tema, titulo_bloque, ALTO_BANDA, CAJITA_PLAZO};
 use crate::tui::{Ctx, Pantalla};
 use ratatui::crossterm::event::KeyEvent;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Padding, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 #[derive(Default)]
@@ -41,209 +43,491 @@ fn plazo_en_dias(dias: i64) -> String {
     if dias < 0 { format!("hace {txt}") } else { format!("dentro de {txt}") }
 }
 
-/// Lo del borde de abajo en `ancho` columnas: « Tus datos: ~/Impuestos/ana » y « gesshtor 0.1.0 · 1a2b3c ». Si no
+/// Lo de la fila de abajo en `ancho` columnas: «Tus datos: ~/Impuestos/ana» y «gesshtor 0.1.0 · 1a2b3c». Si no
 /// cabe, la ruta se corta por delante (lo último es la carpeta de la persona) y, si ni así, sin la versión.
 fn borde(ruta: &str, version: &str, ancho: usize) -> (String, Option<String>) {
-    let version = format!(" gesshtor {version} ");
+    let version = format!("gesshtor {version}");
     let n = |s: &str| s.chars().count();
-    let con_version = ancho.saturating_sub(4 + n(&version));
-    let (libre, version) = if con_version >= 30 { (con_version, Some(version)) } else { (ancho.saturating_sub(4), None) };
-    let entera = format!(" Tus datos: {ruta} ");
+    // Con la versión, si a la ruta le quedan al menos 30 columnas (y 3 de aire entre las dos).
+    let con_version = ancho.saturating_sub(3 + n(&version));
+    let (libre, version) = if con_version >= 30 { (con_version, Some(version)) } else { (ancho, None) };
+    let entera = format!("Tus datos: {ruta}");
     if n(&entera) <= libre {
         return (entera, version);
     }
-    let cabe = libre.saturating_sub(n(" Tus datos: … "));
+    let cabe = libre.saturating_sub(n("Tus datos: …"));
     let cola: String = ruta.chars().skip(n(ruta).saturating_sub(cabe)).collect();
-    (format!(" Tus datos: …{cola} "), version)
+    (format!("Tus datos: …{cola}"), version)
 }
 
-/// Una tarjeta: su título y sus líneas.
-type Tarjeta = (&'static str, Vec<Line<'static>>);
+/// Lo más ancho de cada columna.
+const COLUMNA: u16 = 46;
 
-/// Lo de arriba (el saludo y qué eres ahora) y las tarjetas: tu certificado (o de cuándo es lo que ves), empleo,
-/// autónomo y Hacienda.
-fn partes(i: &Datos, ctx: &Ctx) -> (Vec<Line<'static>>, Vec<Tarjeta>) {
+fn negrita() -> Style {
+    Style::new().add_modifier(Modifier::BOLD)
+}
+
+/// «2026-10-14» → «14 oct» si es de `anio`; si no, con el año: «28 ene 2027».
+fn dia_corto(fecha: &str, anio: i32) -> String {
+    let c = fecha_corta(fecha);
+    match c.rsplit_once(' ') {
+        Some((dm, _)) if fmt::anio_de(fecha) == anio => dm.to_string(),
+        _ => c,
+    }
+}
+
+/// «130», «130 y 303», «130, 303 y 390».
+fn y_lista(v: &[String]) -> String {
+    match v.split_last() {
+        Some((u, resto)) if !resto.is_empty() => format!("{} y {u}", resto.join(", ")),
+        Some((u, _)) => u.clone(),
+        None => String::new(),
+    }
+}
+
+/// Una fila de un bloque de texto: un texto en trozos, cada uno con su estilo (se parte si no cabe), o un dato con
+/// puntos guía («tu cuota de octubre ······ 294,00 €»).
+enum Renglon {
+    Texto(Vec<(String, Style)>),
+    /// Como `Texto`, pero en una sola fila: si no cabe, se corta con «…».
+    Corto(Vec<(String, Style)>),
+    Dato(String, String),
+}
+
+fn texto(t: impl Into<String>, st: Style) -> Renglon {
+    Renglon::Texto(vec![(t.into(), st)])
+}
+
+/// Los trozos en una fila de `w` columnas (separados por un espacio, como `envolver`); lo que no cabe, fuera, con «…».
+fn una_fila(t: &[(String, Style)], w: usize) -> Line<'static> {
+    let mut v = Vec::new();
+    let mut libre = w;
+    for (k, (txt, st)) in t.iter().enumerate() {
+        let txt = if k > 0 { format!(" {txt}") } else { txt.clone() };
+        let n = txt.chars().count();
+        if n <= libre {
+            libre -= n;
+            v.push(Span::styled(txt, *st));
+        } else {
+            let corto: String = txt.chars().take(libre.saturating_sub(1)).collect();
+            v.push(Span::styled(format!("{}…", corto.trim_end()), *st));
+            break;
+        }
+    }
+    Line::from(v)
+}
+
+/// Un bloque de texto: su título (en gris y en minúscula) y sus filas.
+struct Bloque {
+    titulo: &'static str,
+    filas: Vec<Renglon>,
+    /// Corre prisa (lo que no se ha podido traer, un certificado que caduca): antes que nada, se tiene que ver entero.
+    urge: bool,
+}
+
+impl Bloque {
+    /// Sus líneas en `w` columnas, fila a fila (la primera, el título): lo largo, partido; los datos, con la cifra
+    /// acabando en `w` (si no caben en una fila, con la etiqueta partida).
+    fn filas(&self, w: u16) -> Vec<Vec<Line<'static>>> {
+        let ancho = w as usize;
+        let mut v = vec![vec![titulo_bloque(self.titulo)]];
+        for r in &self.filas {
+            v.push(match r {
+                Renglon::Texto(t) => envolver(t, ancho, 0),
+                Renglon::Corto(t) => vec![una_fila(t, ancho)],
+                Renglon::Dato(e, c) if e.chars().count() + c.chars().count() + 3 <= ancho => vec![guia(e.clone(), c.clone(), Style::new(), w)],
+                Renglon::Dato(e, c) => {
+                    // La etiqueta, partida para que la cifra quepa en su última línea.
+                    let mut v: Vec<Line<'static>> = partir(e, ancho.saturating_sub(c.chars().count() + 3)).into_iter().map(Line::from).collect();
+                    let ultima = v.pop().unwrap_or_default();
+                    v.push(guia(ultima, c.clone(), Style::new(), w));
+                    v
+                }
+            });
+        }
+        v
+    }
+
+    /// Las líneas que caben en `alto` filas: las filas enteras, de la primera en adelante, mientras quepan (y al
+    /// menos el título y una). Vacío si no cabe ni eso.
+    fn lineas(&self, w: u16, alto: u16) -> Vec<Line<'static>> {
+        let mut v = Vec::new();
+        for fila in self.filas(w) {
+            if v.len() + fila.len() > alto as usize {
+                break;
+            }
+            v.extend(fila);
+        }
+        if v.len() < 2 { Vec::new() } else { v }
+    }
+
+    fn alto(&self, w: u16) -> u16 {
+        self.filas(w).iter().map(|f| f.len() as u16).sum()
+    }
+}
+
+/// Lo último presentado en Hacienda: «✓ 130 y 303 del 3T 2026 · 14 oct».
+fn bloque_ultimo(i: &Datos) -> Option<Bloque> {
+    let (modelos, periodo, anio, fecha) = i.ultimo_presentado.as_ref()?;
+    let mut t = vec![("✓".to_string(), negrita().fg(tema::BIEN)), (format!("{} del {periodo} {anio}", y_lista(modelos)), Style::new())];
+    if !fecha.is_empty() {
+        t.push((format!("· {}", dia_corto(fecha, *anio)), tema::apagado()));
+    }
+    Some(Bloque { titulo: "lo último", filas: vec![Renglon::Texto(t)], urge: false })
+}
+
+/// Tu alta y tu baja, tu actividad en la Seguridad Social, tu cuota y tu base de cotización (y la próxima).
+fn bloque_autonomo(a: &crate::informe::inicio::Autonomo) -> Bloque {
     let gris = tema::apagado();
-    let negrita = Style::new().add_modifier(Modifier::BOLD);
-    let ahora = match (i.empleo_ahora, i.autonomo_ahora) {
-        (true, true) => "Ahora trabajas por cuenta ajena y por tu cuenta (en autónomos).",
-        (false, true) => "Ahora trabajas por tu cuenta (de alta en autónomos).",
-        (true, false) => "Ahora trabajas por cuenta ajena.",
-        (false, false) => "Ahora no constas de alta en autónomos ni con nóminas recientes.",
+    let mut v = Vec::new();
+    if !a.alta.is_empty() {
+        let mut t = vec![(format!("De alta desde el {}", fecha_corta(&a.alta)), Style::new())];
+        if !a.baja.is_empty() {
+            t.push((format!(", de baja desde el {}", fecha_corta(&a.baja)), Style::new()));
+        }
+        let mutua = a.mutua.entidad.trim();
+        if !mutua.is_empty() {
+            t.push((format!("· mutua {mutua}"), gris));
+        }
+        v.push(Renglon::Texto(t));
+    }
+    if let Some((cuota, mes)) = &a.cuota {
+        v.push(Renglon::Dato(format!("tu cuota de {mes}"), eur(*cuota)));
+    }
+    if let Some(b) = a.cotizacion.base {
+        v.push(Renglon::Dato("base de cotización".into(), eur(b)));
+    }
+    if let Some(r) = a.cotizacion.rendimientos_previstos {
+        v.push(Renglon::Dato("rendimientos previstos".into(), eur(r)));
+    }
+    if let Some(b) = a.cotizacion.base_proxima {
+        let desde = &a.cotizacion.base_proxima_desde;
+        let e = if desde.is_empty() { "tu base pasa a".to_string() } else { format!("desde el {}, tu base", fecha_corta(desde)) };
+        v.push(Renglon::Dato(e, eur(b)));
+    }
+    // Lo que figura como tu actividad, al final: si no cabe todo, es lo que menos falta hace.
+    for act in &a.actividades {
+        let mut t = vec![(act.tipo.trim().to_string(), Style::new())];
+        let desde = act.inicio.trim();
+        if !desde.is_empty() {
+            t.push((format!("· desde el {}", fecha_corta(desde)), gris));
+        }
+        v.push(Renglon::Texto(t));
+        let cnae = [act.cnae.trim().to_string(), frase(&act.cnae_texto)].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+        if !cnae.is_empty() {
+            v.push(texto(cnae, gris));
+        }
+    }
+    Bloque { titulo: "autónomo", filas: v, urge: false }
+}
+
+/// Tu última nómina según la Seguridad Social y hasta cuándo se ha consultado.
+fn bloque_empleo(n: &crate::informe::inicio::UltimaNomina) -> Bloque {
+    let donde = if n.empresas.is_empty() { String::new() } else { format!(", en {}", n.empresas.join(" y ")) };
+    let hasta = if n.consultado_hasta.as_str() > n.mes.as_str() {
+        format!("La Seguridad Social está consultada hasta {}.", nombre_mes(&n.consultado_hasta))
+    } else {
+        format!("Según la Seguridad Social, consultada hasta {}.", nombre_mes(&n.consultado_hasta))
     };
-    let saludo = vec![
-        Line::styled(if i.nombre.is_empty() { "Hola.".to_string() } else { format!("Hola, {}.", i.nombre) }, negrita.fg(tema::ACENTO)),
-        Line::styled(ahora, gris),
-    ];
-    let mut tarjetas: Vec<Tarjeta> = Vec::new();
+    let filas = vec![texto(format!("Tu última nómina: {}{donde}.", nombre_mes(&n.mes)), Style::new()), texto(hasta, tema::apagado())];
+    Bloque { titulo: "empleo", filas, urge: false }
+}
 
-    // El certificado y lo traído.
-    // Sin certificado no se abre la app (solo en las pruebas falta).
-    if let Some(c) = ctx.certificado.as_deref() {
-        let mut v = Vec::new();
-        let dias = c.dias_para_caducar();
-        v.push(Line::from(format!("{} · {}", c.nombre_completo(), c.nif)));
-        let st = if dias < 0 {
-            Style::new().fg(tema::MAL).add_modifier(Modifier::BOLD)
-        } else if dias < 60 {
-            Style::new().fg(tema::AVISO).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new()
-        };
-        let verbo = if dias < 0 { "Caducó" } else { "Caduca" };
-        let mut l = vec![Span::styled(format!("{verbo} el {} ({})", fecha_corta(&c.caduca), plazo_en_dias(dias)), st)];
-        if (0..60).contains(&dias) {
-            l.push(Span::styled(" · renuévalo en la web de la FNMT", st));
+/// Tu certificado: de quién es, cuándo caduca, lo traído con él la última vez (o por dónde va) y quién lo emitió. Y si
+/// corre prisa: si caduca en menos de 60 días (o ya caducó).
+fn bloque_certificado(c: &crate::red::certificado::Certificado, ctx: &Ctx) -> (Bloque, bool) {
+    let gris = tema::apagado();
+    let dias = c.dias_para_caducar();
+    let st = if dias < 0 {
+        negrita().fg(tema::MAL)
+    } else if dias < 60 {
+        negrita().fg(tema::AVISO)
+    } else {
+        Style::new()
+    };
+    let verbo = if dias < 0 { "Caducó" } else { "Caduca" };
+    let mut caduca = vec![(format!("{verbo} el {} ({})", fecha_corta(&c.caduca), plazo_en_dias(dias)), st)];
+    if (0..60).contains(&dias) {
+        caduca.push(("· renuévalo en la web de la FNMT".into(), st));
+    }
+    // De quién es y cuándo caduca; si corre prisa, primero cuándo caduca.
+    let quien = texto(format!("{} · {}", c.nombre_completo(), c.nif), Style::new());
+    let prisa = dias < 60;
+    let mut v = if prisa { vec![Renglon::Texto(caduca), quien] } else { vec![quien, Renglon::Texto(caduca)] };
+    v.push(match (&ctx.sincronizando, &ctx.sincronizado) {
+        (Some(p), _) => texto(format!("Trayendo lo último… {p}"), Style::new().fg(tema::acento())),
+        (None, Some((c, res, _))) => texto(format!("Traído {}: {res}.", cuando(c)), Style::new().fg(tema::BIEN)),
+        (None, None) => texto("S: traer lo último de Hacienda y la Seguridad Social.", gris),
+    });
+    // Quién lo emitió, al final: si no cabe todo, es lo que menos falta hace.
+    if !c.emisor.is_empty() {
+        v.push(texto(format!("Emitido por {}", c.emisor), gris));
+    }
+    (Bloque { titulo: "tu certificado", filas: v, urge: prisa }, prisa)
+}
+
+/// Lo que no se ha podido traer la última vez (hasta 4 cosas), en MAL. Con poco sitio (`cortos`), cada una en una
+/// fila, cortada si no cabe (lo de Hacienda y la Seguridad Social, entero, también está con «!», en los fallos).
+fn bloque_errores(ctx: &Ctx, cortos: bool) -> Option<Bloque> {
+    let (_, _, errores) = ctx.sincronizado.as_ref().filter(|_| ctx.sincronizando.is_none())?;
+    let fila = |e: &String| {
+        let t = vec![("✗".into(), negrita().fg(tema::MAL)), (e.clone(), Style::new().fg(tema::MAL))];
+        if cortos { Renglon::Corto(t) } else { Renglon::Texto(t) }
+    };
+    let filas = errores.iter().take(4).map(fila).collect::<Vec<_>>();
+    (!filas.is_empty()).then_some(Bloque { titulo: "no se ha podido traer", filas, urge: true })
+}
+
+/// Los bloques de debajo, de más a menos importante: lo que no se ha podido traer; tu certificado si caduca pronto;
+/// lo de autónomo y tu nómina (lo de ahora primero: si solo trabajas por cuenta ajena, la nómina); y tu certificado
+/// si no corre prisa.
+fn bloques(i: &Datos, ctx: &Ctx, cortos: bool) -> Vec<Bloque> {
+    let cert = ctx.certificado.as_deref().map(|c| bloque_certificado(c, ctx));
+    let (urge, cert) = match cert {
+        Some((b, true)) => (Some(b), None),
+        Some((b, false)) => (None, Some(b)),
+        None => (None, None),
+    };
+    let mut trabajo: Vec<Bloque> = i.autonomo.as_ref().map(bloque_autonomo).into_iter().chain(i.empleo.as_ref().map(bloque_empleo)).collect();
+    if i.empleo_ahora && !i.autonomo_ahora {
+        trabajo.reverse();
+    }
+    bloque_errores(ctx, cortos).into_iter().chain(urge).chain(trabajo).chain(cert).collect()
+}
+
+/// Una fila de cómo va el año: una línea o la banda de lo que te queda (tres filas, con su fondo).
+enum FilaAnio {
+    Linea(Line<'static>),
+    Banda(Line<'static>, Color),
+}
+
+/// Cómo va el año en `w` columnas: lo generado, la barra fina, lo que te queda (en su banda), a dónde fue lo demás
+/// (cada uno con la muestra de su tramo) y, si hay, el IVA, que no cuenta. Las cifras acaban en `w`. `holgado`:
+/// con aire entre las partes.
+fn filas_anio(r: &Reparto, w: u16, holgado: bool) -> Vec<FilaAnio> {
+    let t = &r.total;
+    let mut v = Vec::new();
+    let aire = |v: &mut Vec<FilaAnio>| {
+        if holgado {
+            v.push(FilaAnio::Linea(Line::default()));
         }
-        v.push(Line::from(l));
-        if !c.emisor.is_empty() {
-            v.push(Line::styled(format!("Emitido por {}", c.emisor), gris));
-        }
-        match (&ctx.sincronizando, &ctx.sincronizado) {
-            (Some(p), _) => v.push(Line::styled(format!("Trayendo lo último… {p}"), Style::new().fg(tema::ACENTO))),
-            (None, Some((c, res, errores))) => {
-                v.push(Line::styled(format!("Traído {}: {res}.", cuando(c)), Style::new().fg(tema::BIEN)));
-                for e in errores.iter().take(4) {
-                    v.push(Line::styled(format!("No se ha podido: {e}"), Style::new().fg(tema::MAL)));
+    };
+    v.push(FilaAnio::Linea(guia(Span::styled("generaste en el año", tema::apagado()), eur(fmt::r2(t.generado - t.iva)), Style::new(), w)));
+    v.push(FilaAnio::Linea(barra(&[(t.queda, tema::BIEN), (t.seguridad_social, tema::AZUL), (t.irpf, tema::AVISO), (t.gastos, tema::MARCO)], w)));
+    aire(&mut v);
+    // Si te queda menos que nada, en MAL, sobre un fondo suave como los SUAVE_* de la paleta (en torno al 13 %).
+    let (c, fondo) = if t.queda < -DIF { (tema::MAL, tema::mezcla(tema::MAL, tema::FONDO, 0.13)) } else { (tema::BIEN, tema::SUAVE_BIEN) };
+    let queda = Line::from(vec![muestra(c), Span::styled("te queda", negrita().fg(c))]);
+    v.push(FilaAnio::Banda(guia(queda, eur(t.queda), Style::new().fg(c), w), fondo));
+    aire(&mut v);
+    let irpf = if r.con_renta { "IRPF" } else { "IRPF adelantado" };
+    let mut partes = vec![(tema::AZUL, "Seguridad Social", t.seguridad_social), (tema::AVISO, irpf, t.irpf)];
+    if t.gastos.abs() > DIF {
+        partes.push((tema::MARCO, "gastos del negocio", t.gastos));
+    }
+    for (c, e, x) in partes {
+        v.push(FilaAnio::Linea(guia(Line::from(vec![muestra(c), Span::raw(e)]), eur(x), Style::new(), w)));
+    }
+    if t.iva > DIF {
+        aire(&mut v);
+        let nota = format!("el IVA que pasa por tus manos ({}) no cuenta: es de Hacienda.", eur(t.iva));
+        v.extend(envolver(&[(nota, tema::apagado())], w as usize, 0).into_iter().map(FilaAnio::Linea));
+    }
+    v
+}
+
+fn alto_anio(v: &[FilaAnio]) -> u16 {
+    v.iter().map(|x| if matches!(x, FilaAnio::Banda(..)) { ALTO_BANDA } else { 1 }).sum()
+}
+
+/// Pinta cómo va el año desde arriba de `area`. La banda sobresale 2 columnas por la derecha (si hay sitio), para que
+/// la cifra no quede pegada al borde de su fondo.
+fn pintar_anio(f: &mut Frame, area: Rect, filas: Vec<FilaAnio>, limite: Rect) {
+    let mut y = area.y;
+    for x in filas {
+        match x {
+            FilaAnio::Linea(l) => {
+                f.render_widget(Paragraph::new(l), Rect { y, height: 1, ..area }.intersection(limite));
+                y += 1;
+            }
+            FilaAnio::Banda(l, fondo) => {
+                let r = Rect { y, height: ALTO_BANDA, width: area.width + 2, ..area }.intersection(limite);
+                if r.height == ALTO_BANDA {
+                    banda(f, r, fondo, l);
+                } else {
+                    // Sin sitio para el aire: solo la cifra, en la fila que quede.
+                    f.render_widget(Paragraph::new(l), Rect { height: r.height.min(1), ..r });
                 }
-            }
-            (None, None) => v.push(Line::styled("S: traer lo último de Hacienda y la Seguridad Social.", gris)),
-        }
-        tarjetas.push(("Tu certificado", v));
-    }
-
-    // Empleo.
-    if let Some(n) = &i.empleo {
-        let mut v = Vec::new();
-        let donde = if n.empresas.is_empty() { String::new() } else { format!(", en {}", n.empresas.join(" y ")) };
-        v.push(Line::from(format!("Tu última nómina: {}{donde}.", nombre_mes(&n.mes))));
-        if n.consultado_hasta.as_str() > n.mes.as_str() {
-            v.push(Line::styled(format!("(La Seguridad Social está consultada hasta {}.)", nombre_mes(&n.consultado_hasta)), gris));
-        } else {
-            v.push(Line::styled(format!("Según la Seguridad Social, consultada hasta {}.", nombre_mes(&n.consultado_hasta)), gris));
-        }
-        tarjetas.push(("Empleo", v));
-    }
-
-    // Autónomo.
-    if let Some(a) = &i.autonomo {
-        let mut v = Vec::new();
-        let alta = if a.alta.is_empty() { String::new() } else { format!("De alta desde el {}", fecha_corta(&a.alta)) };
-        let baja = if a.baja.is_empty() { String::new() } else { format!(", de baja desde el {}", fecha_corta(&a.baja)) };
-        if !alta.is_empty() {
-            let mutua = a.mutua.entidad.trim();
-            v.push(Line::from(format!("{alta}{baja}{}.", if mutua.is_empty() { String::new() } else { format!(" · mutua {mutua}") })));
-        }
-        for act in &a.actividades {
-            let desde = act.inicio.trim();
-            let desde = if desde.is_empty() { String::new() } else { format!(", desde el {}", fecha_corta(desde)) };
-            v.push(Line::from(format!("En la Seguridad Social: {}{desde}", act.tipo.trim())));
-            let cnae = [act.cnae.trim().to_string(), frase(&act.cnae_texto)].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
-            if !cnae.is_empty() {
-                v.push(Line::styled(cnae, gris));
+                y += ALTO_BANDA;
             }
         }
-        if let Some((cuota, mes)) = &a.cuota {
-            let mut s = format!("Tu cuota de {mes}: {}", eur(*cuota));
-            if let Some(b) = a.cotizacion.base {
-                s += &format!(" (base de cotización {}", eur(b));
-                if let Some(r) = a.cotizacion.rendimientos_previstos {
-                    s += &format!(", por unos rendimientos previstos de {}", eur(r));
-                }
-                s.push(')');
-            }
-            s.push('.');
-            v.push(Line::from(s));
-        }
-        if let Some(b) = a.cotizacion.base_proxima {
-            let desde = &a.cotizacion.base_proxima_desde;
-            let d = if desde.is_empty() { String::new() } else { format!("Desde el {}", fecha_corta(desde)) };
-            v.push(Line::from(format!("{d}, tu base pasa a {}.", eur(b))));
-        }
-        tarjetas.push(("Autónomo", v));
     }
-
-    // Hacienda.
-    if i.ultimo_presentado.is_some() || i.proximo_plazo.is_some() {
-        let mut v = Vec::new();
-        if let Some((q, ini, fin)) = &i.proximo_plazo {
-            v.push(Line::from(vec![Span::styled("Próximo plazo:", gris), Span::raw(format!("el {q}, del {} al {}.", fecha_corta(ini), fecha_corta(fin)))]));
-        }
-        if let Some((modelos, periodo, anio, fecha)) = &i.ultimo_presentado {
-            let cuando = if fecha.is_empty() { String::new() } else { format!(" (el {})", fecha_corta(fecha)) };
-            v.push(Line::from(vec![Span::styled("Lo último presentado:", gris), Span::raw(format!("{} del {periodo} {anio}{cuando}.", modelos.join(" y ")))]));
-        }
-        tarjetas.push(("Hacienda", v));
-    }
-    (saludo, tarjetas)
 }
 
-/// Las líneas de una tarjeta, partidas para que quepan en `w` columnas.
-fn partir_lineas(v: &[Line<'static>], w: usize) -> Vec<Line<'static>> {
-    v.iter().flat_map(|l| envolver(&l.spans.iter().map(|s| (s.content.to_string(), s.style)).collect::<Vec<_>>(), w, 0)).collect()
+/// Con la cajita de calendario (y el texto al lado) si caben en `w` columnas.
+fn con_cajita(w: u16) -> bool {
+    w >= CAJITA_PLAZO.0 + 2 + 22
 }
 
-/// Dónde va cada tarjeta en estas columnas (cada una en la que va más corta, para que queden parejas): (columna,
-/// y, alto, líneas), y cuántas líneas no caben.
-fn colocar(tarjetas: &[Tarjeta], columnas: &[Rect]) -> (Vec<(Rect, Vec<Line<'static>>)>, usize) {
-    let mut y: Vec<u16> = columnas.iter().map(|c| c.y).collect();
-    let (mut v, mut fuera) = (Vec::new(), 0);
-    for (_, lineas) in tarjetas {
-        let c = (0..columnas.len()).min_by_key(|&k| y[k]).unwrap_or(0);
-        let col = columnas[c];
-        let lineas = partir_lineas(lineas, col.width.saturating_sub(4) as usize);
-        let quiere = lineas.len() as u16 + 2;
-        let alto = quiere.min(col.bottom().saturating_sub(y[c]));
-        fuera += quiere.saturating_sub(alto.max(2)) as usize;
-        v.push((Rect { y: y[c], height: alto, ..col }, lineas));
-        y[c] += alto;
-    }
-    (v, fuera)
-}
-
-/// Las tarjetas en dos columnas o, si así cabe más, en una.
-fn pintar_tarjetas(f: &mut Frame, area: Rect, tarjetas: Vec<Tarjeta>) {
-    let [a, _, b] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(1), Constraint::Fill(1)]).areas(area);
-    let (dos, fuera_dos) = colocar(&tarjetas, &[a, b]);
-    let (una, fuera_una) = colocar(&tarjetas, &[area]);
-    let sitios = if area.width >= 76 && fuera_dos <= fuera_una { dos } else { una };
-    for ((titulo, _), (r, lineas)) in tarjetas.iter().zip(sitios) {
-        if r.height >= 3 {
-            f.render_widget(Paragraph::new(lineas).block(bloque(titulo).padding(Padding::horizontal(1))), r);
+/// El próximo plazo, en texto: cuál, sus fechas («del 1 ene al 1 feb»; sin la cajita, que dice el año, «… al 1 feb
+/// 2027») y cuánto falta para que empiece o termine.
+fn textos_plazo(q: &str, ini: &str, fin: &str, con_cajita: bool) -> (Line<'static>, Line<'static>, Line<'static>) {
+    let hoy = fmt::hoy();
+    let anio = fmt::anio_de(fin);
+    let hasta = if con_cajita { dia_corto(fin, anio) } else { fecha_corta(fin) };
+    let fechas = format!("del {} al {hasta}", dia_corto(ini, anio));
+    let ac = negrita().fg(tema::acento());
+    let gris = tema::apagado();
+    let dias = |n: i64| if n == 1 { "1 día".to_string() } else { format!("{n} días") };
+    let falta = if ini > hoy.as_str() {
+        Line::from(vec![Span::styled("empieza en ", gris), Span::styled(dias(fmt::dias_entre(&hoy, ini)), ac)])
+    } else {
+        match fmt::dias_entre(&hoy, fin) {
+            0 => Line::styled("hoy es el último día", ac),
+            n => Line::from(vec![Span::styled("faltan ", gris), Span::styled(dias(n), ac)]),
         }
+    };
+    (Line::from(format!("el {q}")), Line::styled(fechas, gris), falta)
+}
+
+/// Las filas que ocupa el próximo plazo (con su título) en `w` columnas.
+fn alto_plazo(w: u16) -> u16 {
+    1 + if con_cajita(w) { CAJITA_PLAZO.1 } else { 3 }
+}
+
+/// El próximo plazo desde arriba de `area`: el título y la cajita con el último día y, al lado, cuál es, sus fechas
+/// y cuánto falta; si no cabe la cajita, solo el texto.
+fn pintar_plazo(f: &mut Frame, area: Rect, (q, ini, fin): &(String, String, String), limite: Rect) {
+    let fila = |y: u16, x: u16| Rect { x: area.x + x, y: area.y + y, width: area.width.saturating_sub(x), height: 1 }.intersection(limite);
+    f.render_widget(Paragraph::new(titulo_bloque("próximo plazo")), fila(0, 0));
+    let (cual, fechas, falta) = textos_plazo(q, ini, fin, con_cajita(area.width));
+    if con_cajita(area.width) {
+        let caja = Rect { y: area.y + 1, height: CAJITA_PLAZO.1, ..area }.intersection(limite);
+        if caja.height == CAJITA_PLAZO.1 {
+            cajita_plazo(f, caja, fin);
+        }
+        let x = CAJITA_PLAZO.0 + 2;
+        // Como en el boceto: cuál y sus fechas, arriba; cuánto falta, a la altura del día.
+        for (y, l) in [(1, cual), (2, fechas), (4, falta)] {
+            f.render_widget(Paragraph::new(l), fila(y, x));
+        }
+    } else {
+        for (y, l) in [(1, cual), (2, fechas), (3, falta)] {
+            f.render_widget(Paragraph::new(l), fila(y, 0));
+        }
+    }
+}
+
+/// Dónde va cada cosa del contenido (menos la fila de abajo, la de tus datos).
+#[derive(Default)]
+struct Plan {
+    /// Arriba: «Así va tu 2026, hasta hoy.» y qué eres ahora.
+    arriba: Vec<Line<'static>>,
+    /// Lo de en medio: hasta dónde llega (lo que se salga, se recorta).
+    medio: Rect,
+    anio: Option<(Rect, Vec<FilaAnio>)>,
+    plazo: Option<Rect>,
+    bloques: Vec<(Rect, Vec<Line<'static>>)>,
+    /// ¿Ha cabido todo entero? ¿Y lo que corre prisa?
+    entero: bool,
+    urgente_entero: bool,
+}
+
+/// Las columnas, de la que va más corta (`y`: por qué fila va cada una) a la que más.
+fn por_orden(y: &[u16]) -> Vec<usize> {
+    let mut v: Vec<usize> = (0..y.len()).collect();
+    v.sort_by_key(|&c| (y[c], c));
+    v
+}
+
+/// Pone un bloque en la primera columna de `orden` en la que cabe entero o, si no cabe en ninguna, lo que quepa de
+/// él (sus primeras filas) en la que tenga más sitio. `y`: por qué fila va cada columna.
+fn poner(plan: &mut Plan, b: &Bloque, cols: &[Rect], orden: &[usize], y: &mut [u16]) {
+    let fin = plan.medio.bottom();
+    let libre = |c: usize, y: &[u16]| fin.saturating_sub(y[c]);
+    let entero = orden.iter().copied().find(|&c| b.alto(cols[c].width) <= libre(c, y));
+    plan.entero &= entero.is_some();
+    plan.urgente_entero &= entero.is_some() || !b.urge;
+    let Some(c) = entero.or_else(|| orden.iter().copied().max_by_key(|&c| (libre(c, y), std::cmp::Reverse(c)))) else { return };
+    let lineas = b.lineas(cols[c].width, libre(c, y));
+    if !lineas.is_empty() {
+        let alto = lineas.len() as u16;
+        plan.bloques.push((Rect { y: y[c], height: alto, ..cols[c] }, lineas));
+        y[c] += alto + 1;
     }
 }
 
 impl Inicio {
-    /// Arriba, en grande: cómo va el año (lo generado, lo que se llevaron impuestos y cotizaciones y lo que te
-    /// queda) y cuánto falta para el próximo plazo.
-    fn pintar_cifras(&self, f: &mut Frame, area: Rect) {
-        let y = fmt::anio_actual();
-        // (etiqueta, valor, nota, estilo), cada texto en largo y en corto (para las tarjetas estrechas).
-        type Cifra = ((String, String), String, (String, String), Style);
-        let mut c: Vec<Cifra> = Vec::new();
-        let dos = |a: String, b: &str| (a, b.to_string());
+    /// Dónde va cada cosa en `area`. Arriba, «Así va tu 2026, hasta hoy.» y qué eres ahora. En medio, en dos columnas
+    /// si caben (en una, si no): a la izquierda, cómo va el año; a la derecha, el próximo plazo y lo último; y debajo,
+    /// los demás bloques, de más a menos importante, cada uno en la columna que vaya más corta. `holgado`: con aire
+    /// entre las partes (sin él, cabe más); `cortos`: lo que no se ha podido traer, en una fila cada cosa.
+    fn planear(&self, area: Rect, ctx: &Ctx, holgado: bool, cortos: bool) -> Plan {
+        let i = &self.i;
+        let gris = tema::apagado();
+        let ahora = match (i.empleo_ahora, i.autonomo_ahora) {
+            (true, true) => "Ahora trabajas por cuenta ajena y por tu cuenta (en autónomos).",
+            (false, true) => "Ahora trabajas por tu cuenta (de alta en autónomos).",
+            (true, false) => "Ahora trabajas por cuenta ajena.",
+            (false, false) => "Ahora no constas de alta en autónomos ni con nóminas recientes.",
+        };
+        let mut arriba = Vec::new();
+        if self.anio.is_some() {
+            let mut l = Line::from(vec![Span::styled(format!("Así va tu {}", fmt::anio_actual()), negrita()), Span::styled(", hasta hoy.", gris)]);
+            // Sin aire, qué eres ahora va en la misma fila, si cabe.
+            if !holgado && l.width() + 3 + ahora.chars().count() <= area.width as usize {
+                l.push_span(Span::styled(format!("   {ahora}"), gris));
+                arriba.push(l);
+            } else {
+                arriba.push(l);
+                arriba.extend(envolver(&[(ahora.to_string(), gris)], area.width as usize, 0));
+            }
+        } else {
+            arriba.extend(envolver(&[(ahora.to_string(), gris)], area.width as usize, 0));
+        }
+        let n_arriba = arriba.len() as u16;
+        // Debajo, la fila de tus datos (y, con aire, una vacía encima).
+        let medio = Rect { y: area.y + n_arriba + 1, height: area.height.saturating_sub(n_arriba + 1 + 1 + u16::from(holgado)), ..area };
+        let mut plan = Plan { arriba, medio, entero: true, urgente_entero: true, ..Default::default() };
+
+        // Como en el boceto, de 46 columnas como mucho cada una: más anchas, las cifras quedan lejos de lo que son.
+        let dos = area.width >= 72;
+        let hueco = if area.width >= 90 { 4 } else { 3 };
+        let izq = if dos { COLUMNA.min(area.width - hueco - 33) } else { area.width };
+        let mut cols = vec![Rect { width: izq, ..medio }];
+        if dos {
+            cols.push(Rect { x: medio.x + izq + hueco, width: (area.width - izq - hueco).min(COLUMNA), ..medio });
+        }
+        let mut y: Vec<u16> = cols.iter().map(|c| c.y).collect();
+
         if let Some(r) = &self.anio {
-            let t = &r.total;
-            c.push((dos(format!("Generado en {y}"), "Generado"), eur(fmt::r2(t.generado - t.iva)), dos("hasta hoy".into(), "hasta hoy"), Style::new()));
-            c.push((dos("Impuestos".into(), "Impuestos"), eur(t.impuestos()), dos("IRPF y Seg. Social".into(), "y Seg. Social"), Style::new().fg(tema::MAL)));
-            let st = Style::new().fg(if t.queda < -0.005 { tema::MAL } else { tema::BIEN });
-            c.push((dos("Te queda".into(), "Te queda"), eur(t.queda), dos("limpio, hasta hoy".into(), "limpio"), st));
+            let filas = filas_anio(r, cols[0].width, holgado);
+            let alto = alto_anio(&filas);
+            plan.entero &= y[0] + alto <= medio.bottom();
+            plan.anio = Some((Rect { y: y[0], height: alto, ..cols[0] }, filas));
+            y[0] += alto + 1;
         }
-        if let Some((q, ini, fin)) = &self.i.proximo_plazo {
-            let hoy = fmt::hoy();
-            let (n, que, dia) = if ini.as_str() > hoy.as_str() { (fmt::dias_entre(&hoy, ini), "empieza", ini) } else { (fmt::dias_entre(&hoy, fin), "termina", fin) };
-            let dias = if n == 1 { "1 día".to_string() } else { format!("{n} días") };
-            c.push((dos(format!("Próximo: {q}"), q), dias, (format!("{que} el {}", fecha_corta(dia)), format!("el {}", fecha_corta(dia))), Style::new().fg(tema::ACENTO)));
+        // El plazo y lo último, juntos: a la derecha del año o, sin él, en la columna más corta.
+        let lado = if self.anio.is_some() && dos { 1 } else { por_orden(&y)[0] };
+        if i.proximo_plazo.is_some() {
+            let alto = alto_plazo(cols[lado].width);
+            if y[lado] + alto <= medio.bottom() {
+                plan.plazo = Some(Rect { y: y[lado], height: alto, ..cols[lado] });
+                y[lado] += alto + 1;
+            } else {
+                plan.entero = false;
+            }
         }
-        let zonas = Layout::horizontal(vec![Constraint::Ratio(1, c.len() as u32); c.len()]).split(area);
-        for (((etq, etq_c), v, (nota, nota_c), st), z) in c.iter().zip(zonas.iter()) {
-            // La etiqueta, en el borde con un espacio a cada lado; la nota, dentro con un margen.
-            let w = z.width as usize;
-            let etq = if etq.chars().count() + 4 <= w { etq } else { etq_c };
-            let nota = if nota.chars().count() + 3 <= w { nota } else { nota_c };
-            kpi(f, *z, etq, v, nota, *st);
+        if let Some(b) = bloque_ultimo(i) {
+            let mut orden = por_orden(&y);
+            orden.sort_by_key(|&c| c != lado);
+            poner(&mut plan, &b, &cols, &orden, &mut y);
         }
+        for b in bloques(i, ctx, cortos) {
+            let orden = por_orden(&y);
+            poner(&mut plan, &b, &cols, &orden, &mut y);
+        }
+        plan
     }
 }
 
@@ -261,22 +545,40 @@ impl Pantalla for Inicio {
             self.anio = (r.total.generado.abs() > 0.005).then_some(r);
             self.clave = Some(clave);
         }
-        let (saludo, tarjetas) = partes(&self.i, ctx);
-        let cifras = self.anio.is_some() || self.i.proximo_plazo.is_some();
-        // Las cifras del año, si queda sitio para las tarjetas.
-        let alto_cifras = if cifras && area.height >= 28 { 6 } else { 0 };
-        let [a_saludo, a_cifras, a_tarjetas, a_pie] =
-            Layout::vertical([Constraint::Length(3), Constraint::Length(alto_cifras), Constraint::Min(0), Constraint::Length(1)]).areas(area);
-        f.render_widget(Paragraph::new(saludo).wrap(Wrap { trim: true }), Rect { x: a_saludo.x + 1, width: a_saludo.width.saturating_sub(1), ..a_saludo });
-        if alto_cifras > 0 {
-            self.pintar_cifras(f, Rect { height: 5, ..a_cifras });
+        if area.width == 0 || area.height == 0 {
+            return;
         }
-        pintar_tarjetas(f, a_tarjetas, tarjetas);
-        // Abajo, siempre a la vista: dónde están tus datos y qué versión es.
+        // Con aire si hay sitio; si así no cabe todo entero, sin él; y si ni así cabe entero lo que corre prisa, con lo
+        // que no se ha podido traer en una fila cada cosa.
+        let mut plan = Plan::default();
+        for (holgado, cortos) in [(true, false), (false, false), (false, true)] {
+            if holgado && area.height < 28 {
+                continue;
+            }
+            plan = self.planear(area, ctx, holgado, cortos);
+            if plan.entero || (!holgado && plan.urgente_entero) {
+                break;
+            }
+        }
+
+        let n_arriba = plan.arriba.len() as u16;
+        f.render_widget(Paragraph::new(plan.arriba), Rect { height: n_arriba, ..area }.intersection(area));
+        if let Some((r, filas)) = plan.anio {
+            pintar_anio(f, r, filas, plan.medio);
+        }
+        if let (Some(r), Some(p)) = (plan.plazo, &self.i.proximo_plazo) {
+            pintar_plazo(f, r, p, plan.medio);
+        }
+        for (r, lineas) in plan.bloques {
+            f.render_widget(Paragraph::new(lineas), r);
+        }
+
+        // Abajo del todo, siempre a la vista: dónde están tus datos y qué versión es.
+        let ultima = Rect { y: area.bottom() - 1, height: 1, ..area };
         let (datos, version) = borde(&ruta_corta(&ctx.dir), crate::VERSION, area.width as usize);
-        f.render_widget(Paragraph::new(Line::styled(datos, tema::apagado())), a_pie);
+        f.render_widget(Paragraph::new(Line::styled(datos, tema::apagado())), ultima);
         if let Some(v) = version {
-            f.render_widget(Paragraph::new(Line::styled(v, tema::apagado()).right_aligned()), a_pie);
+            f.render_widget(Paragraph::new(Line::styled(v, tema::apagado()).right_aligned()), ultima);
         }
     }
 
@@ -300,13 +602,142 @@ mod tests {
     #[test]
     fn el_borde_de_abajo() {
         let (d, v) = borde("~/Impuestos/ana", "0.1.0 · 1a2b3c4d5e6f", 100);
-        assert_eq!((d.as_str(), v.as_deref()), (" Tus datos: ~/Impuestos/ana ", Some(" gesshtor 0.1.0 · 1a2b3c4d5e6f ")));
+        assert_eq!((d.as_str(), v.as_deref()), ("Tus datos: ~/Impuestos/ana", Some("gesshtor 0.1.0 · 1a2b3c4d5e6f")));
         // Si no cabe, se ve el final de la ruta: la carpeta de la persona.
         let (d, v) = borde("~/Documentos/mis papeles/Impuestos/ana-perez", "0.1.0 · 1a2b3c4d5e6f", 70);
-        assert!(d.ends_with("Impuestos/ana-perez ") && d.contains('…') && v.is_some(), "{d}");
-        assert!(d.chars().count() + v.unwrap().chars().count() <= 70 - 4);
+        assert!(d.ends_with("Impuestos/ana-perez") && d.contains('…') && v.is_some(), "{d}");
+        assert!(d.chars().count() + 3 + v.unwrap().chars().count() <= 70);
         // Muy estrecho: solo la ruta.
         let (d, v) = borde("~/Impuestos/ana-perez", "0.1.0 · 1a2b3c4d5e6f", 40);
-        assert!(v.is_none() && d.ends_with("ana-perez ") && d.chars().count() <= 36, "{d}");
+        assert!(v.is_none() && d.ends_with("ana-perez") && d.chars().count() <= 40, "{d}");
+    }
+
+    #[test]
+    fn listas_y_fechas_cortas() {
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(y_lista(&v(&["130"])), "130");
+        assert_eq!(y_lista(&v(&["130", "303"])), "130 y 303");
+        assert_eq!(y_lista(&v(&["130", "303", "390"])), "130, 303 y 390");
+        assert_eq!(dia_corto("2026-10-14", 2026), "14 oct");
+        assert_eq!(dia_corto("2027-01-28", 2026), "28 ene 2027");
+    }
+
+    /// Una persona con todo: alta de autónoma (con su actividad, su cuota y sus bases), nómina, lo presentado en
+    /// Hacienda, una nómina de este año y su certificado (que caduca `en` días), con lo traído (y lo que no).
+    fn con_todo(en: i64, errores: &[&str]) -> crate::tui::App {
+        use crate::dominio::hacienda::{Consulta, Decl, Modelo};
+        use crate::dominio::tgss::{Actividad, Alta, Cotizacion, Liquidacion, Mutua};
+        let mut a = crate::tui::prueba::app();
+        let mut c = crate::red::certificado::Certificado::de_prueba("00000000T", "ANA", "PRUEBA");
+        c.caduca = fmt::sumar_dias(&fmt::hoy(), en);
+        a.ctx.certificado = Some(std::sync::Arc::new(c));
+        let resumen = "Hacienda: 2 años · Seguridad Social: al día · 3 meses de nómina · 5 PDF nuevos";
+        a.ctx.sincronizado = Some((fmt::ahora(), resumen.into(), errores.iter().map(|e| e.to_string()).collect()));
+        let d = &mut a.ctx.datos;
+        let y = fmt::anio_actual();
+        d.nominas.push(crate::dominio::Nomina { id: "n1".into(), anio: y, mes: 1, dinerario: 2000.0, ..Default::default() });
+        let t = &mut d.tgss;
+        t.reta = true;
+        t.alta = Alta { fecha: "2023-03-01".into(), ..Default::default() };
+        t.mutua = Mutua { entidad: "Mutua de Prueba".into() };
+        t.actividades = vec![Actividad { inicio: "2023-03-01".into(), tipo: "Trabajador por cuenta propia".into(), cnae: "6201".into(), cnae_texto: "PROGRAMACION INFORMATICA".into() }];
+        t.cotizacion = Cotizacion {
+            rendimientos_previstos: Some(18000.0),
+            base: Some(1150.0),
+            base_proxima: Some(1200.0),
+            base_proxima_desde: format!("{}-01-01", y + 1),
+            ultima_cuota: Some(294.0),
+            ultima_cuota_mes: "octubre".into(),
+        };
+        for n in 1..=2 {
+            t.nomina.meses.insert(fmt::mes_mas(fmt::ym(&fmt::hoy()), -n), vec![Liquidacion { empresa: "Empresa de Prueba SL".into(), ..Default::default() }]);
+        }
+        let decl = |m: &str| Decl { modelo: m.into(), ejercicio: y - 1, periodo: "4T".into(), justificante: format!("{m}0000000001"), fecha: format!("{y}-01-28T10:00:00"), ..Default::default() };
+        let modelos = ["130", "303"].map(|m| (m.to_string(), Modelo { fecha: fmt::ahora(), decl: vec![decl(m)] }));
+        d.hacienda.insert(y - 1, Consulta { fecha: fmt::ahora(), modelos: modelos.into_iter().collect(), ..Default::default() });
+        crate::tui::prueba::ir(&mut a, "Inicio");
+        a
+    }
+
+    fn ver(p: &str) {
+        if std::env::var("VER").is_ok() {
+            println!("{p}");
+        }
+    }
+
+    /// Con todo y sin prisa, a 120×36 cabe todo entero: el año, el plazo, lo último, lo de autónomo (con su
+    /// actividad), la nómina y el certificado (con lo traído y quién lo emitió). Sin el «Hola» repetido.
+    #[test]
+    fn con_todo_cabe_entero() {
+        use crate::tui::prueba::pantalla;
+        let mut a = con_todo(400, &[]);
+        let p = pantalla(&mut a, 120, 36);
+        ver(&p);
+        for t in ["Así va tu", "te queda", "próximo plazo", "lo último", "✓ 130 y 303 del 4T", "autónomo", "tu cuota de octubre", "6201 · Programacion", "empleo", "Tu última nómina", "consultada hasta", "tu certificado", "Traído hoy", "Emitido por Pruebas", "Tus datos:"] {
+            assert!(p.contains(t), "falta «{t}»:\n{p}");
+        }
+        assert!(!p.contains("Hola, Ana."), "el saludo, solo arriba a la derecha:\n{p}");
+        // A 80×24 no cabe todo, pero sí lo principal.
+        let p = pantalla(&mut a, 80, 24);
+        ver(&p);
+        for t in ["Así va tu", "te queda", "próximo plazo", "lo último", "autónomo", "Tus datos:"] {
+            assert!(p.contains(t), "falta «{t}»:\n{p}");
+        }
+    }
+
+    /// Si el certificado caduca pronto y algo no se ha podido traer, eso va lo primero de lo de debajo y se ve entero,
+    /// también a 80×24.
+    #[test]
+    fn lo_que_falla_y_el_certificado_van_primero() {
+        use crate::tui::prueba::pantalla;
+        let errores = [
+            "Seguridad Social: no se ha podido conectar con el servidor (tiempo agotado)",
+            "Hacienda (2026): la sede electrónica no responde, inténtalo más tarde",
+            "PDF del 303 3T de 2026: no se ha podido descargar",
+            "Seguridad Social (nóminas): la sesión ha caducado",
+        ];
+        let mut a = con_todo(30, &errores);
+        for (w, h) in [(120, 36), (80, 24)] {
+            let p = pantalla(&mut a, w, h);
+            ver(&p);
+            assert!(p.contains("no se ha podido traer"), "{w}x{h}:\n{p}");
+            for e in ["✗ Seguridad Social:", "✗ Hacienda (2026):", "✗ PDF del 303", "✗ Seguridad Social (nóminas):"] {
+                assert!(p.contains(e), "{w}x{h}: falta «{e}»:\n{p}");
+            }
+            assert!(p.contains("tu certificado") && p.contains("Caduca el") && p.contains("renuévalo"), "{w}x{h}:\n{p}");
+            assert!(p.contains("Así va tu") && p.contains("te queda"), "{w}x{h}:\n{p}");
+        }
+    }
+
+    /// Sin nada del año (el 1 de enero, por ejemplo): el plazo y lo demás, desde arriba a la izquierda. Y si solo
+    /// trabajas por cuenta ajena: sin plazo, y la nómina antes que lo de autónomo.
+    #[test]
+    fn sin_el_anio_y_solo_por_cuenta_ajena() {
+        use crate::tui::prueba::{app_con, cargar, caso, ir, pantalla};
+        let dir = caso("a-de-todo");
+        let mut d = cargar(&dir);
+        d.facturas.clear();
+        d.gastos.clear();
+        d.nominas.clear();
+        let mut a = app_con(d.clone(), &dir);
+        ir(&mut a, "Inicio");
+        let p = pantalla(&mut a, 120, 36);
+        ver(&p);
+        let filas: Vec<&str> = p.lines().collect();
+        assert!(!p.contains("Así va tu") && filas[4].contains("Ahora trabajas por tu cuenta"), "{p}");
+        assert!(filas[6].chars().skip(22).collect::<String>().starts_with("próximo plazo"), "a la izquierda:\n{p}");
+        assert!(p.contains("autónomo") && p.contains("De alta desde"), "{p}");
+
+        d.perfil.fecha_alta.clear();
+        d.nominas.push(crate::dominio::Nomina { id: "n1".into(), anio: fmt::anio_actual(), mes: 1, dinerario: 2000.0, ..Default::default() });
+        d.tgss.nomina.meses.insert(fmt::mes_mas(fmt::ym(&fmt::hoy()), -1), vec![crate::dominio::tgss::Liquidacion { empresa: "Empresa de Prueba SL".into(), ..Default::default() }]);
+        let mut a = app_con(d, &dir);
+        ir(&mut a, "Inicio");
+        for (w, h) in [(120, 36), (80, 24)] {
+            let p = pantalla(&mut a, w, h);
+            ver(&p);
+            assert!(p.contains("Así va tu") && p.contains("Ahora trabajas por cuenta ajena.") && p.contains("Tu última nómina"), "{p}");
+            assert!(!p.contains("próximo plazo") && !p.contains("gastos del negocio"), "{p}");
+        }
     }
 }

@@ -1,5 +1,6 @@
-//! La Renta de un año (modelo 100, leída de su PDF), casilla a casilla, para el detalle de «Años»; y el gráfico de
-//! lo que salió en cada Renta. Aquí solo se mira.
+//! La Renta de un año (modelo 100, leída de su PDF) para el detalle de «Años»: su recibo («por qué» sale lo que
+//! sale, con puntos guía) y la Renta casilla a casilla; y el gráfico de lo que salió en cada Renta. Aquí solo se
+//! mira.
 use crate::dominio::fmt::DIF;
 use super::declaraciones::primera_que_cabe;
 use crate::tui::texto::cuando;
@@ -8,7 +9,8 @@ use crate::dominio::fmt;
 use crate::hacienda;
 use crate::hacienda::modelo_100::{numeracion, Numeracion};
 use crate::tui::texto::{dos_columnas, partir};
-use crate::tui::widgets::{bloque, tema};
+use super::anios::color_resultado;
+use crate::tui::widgets::{barra, guia, linea_atajos, muestra, tema, titulo_bloque};
 use crate::tui::Ctx;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -81,6 +83,27 @@ impl Hoja {
 
 type Seccion = (&'static str, Vec<Line<'static>>);
 
+/// Cómo se pagó o se cobró: «domiciliado, en dos plazos: 108,12 € el 30 jun 2024 y 72,08 € el 5 nov 2024»; None si
+/// no se sabe.
+fn forma_de_pago(r: &Renta) -> Option<String> {
+    let plazos: Vec<String> = r
+        .plazos
+        .iter()
+        .map(|p| if p.fecha.is_empty() { fmt::eur(p.importe) } else { format!("{} el {}", fmt::eur(p.importe), fmt::fecha_corta(&p.fecha)) })
+        .collect();
+    let forma = super::declaraciones_detalle::forma(Some(crate::hacienda::Modelo::M100), r.forma);
+    if forma.is_empty() {
+        return None;
+    }
+    let mut t = forma.to_string();
+    if plazos.len() > 1 {
+        t.push_str(&format!(", en dos plazos: {}", plazos.join(" y ")));
+    } else if let (Some(p), "domiciliado") = (plazos.first(), forma) {
+        t.push_str(&format!(", {p}"));
+    }
+    Some(t)
+}
+
 fn seccion_resultado(h: &Hoja, r: &Renta) -> Seccion {
     let mut l = Vec::new();
     if let Some(q) = &r.cuotas {
@@ -105,28 +128,15 @@ fn seccion_resultado(h: &Hoja, r: &Renta) -> Seccion {
     }
     let x = r.resultado;
     let et = if x > DIF { "A pagar" } else if x < -DIF { "A devolver" } else { "Resultado" };
-    l.push(h.fila_con(et, fmt::eur(x.abs()), tema::importe(x).add_modifier(Modifier::BOLD), h.cas.resultado, Tipo::Fuerte));
-    // Cómo se pagó o se cobró.
-    let plazos: Vec<String> = r
-        .plazos
-        .iter()
-        .map(|p| if p.fecha.is_empty() { fmt::eur(p.importe) } else { format!("{} el {}", fmt::eur(p.importe), fmt::fecha_corta(&p.fecha)) })
-        .collect();
-    let forma = super::declaraciones_detalle::forma(Some(crate::hacienda::Modelo::M100), r.forma);
-    if !forma.is_empty() {
-        let mut t = format!("Forma de pago: {forma}");
-        if plazos.len() > 1 {
-            t.push_str(&format!(", en dos plazos: {}", plazos.join(" y ")));
-        } else if let (Some(p), "domiciliado") = (plazos.first(), forma) {
-            t.push_str(&format!(", {p}"));
-        }
-        l.extend(h.nota(&format!("{t}.")));
+    l.push(h.fila_con(et, fmt::eur(x.abs()), color_resultado(x).add_modifier(Modifier::BOLD), h.cas.resultado, Tipo::Fuerte));
+    if let Some(t) = forma_de_pago(r) {
+        l.extend(h.nota(&format!("Forma de pago: {t}.")));
     }
-    ("Resultado y pagos", l)
+    ("resultado y pagos", l)
 }
 
 fn seccion_trabajo(h: &Hoja, r: &Renta) -> Seccion {
-    let Some(t) = &r.trabajo else { return ("Trabajo", h.nota("Sin rendimientos del trabajo (o no se pudieron leer).")) };
+    let Some(t) = &r.trabajo else { return ("trabajo", h.nota("Sin rendimientos del trabajo (o no se pudieron leer).")) };
     let mut l = vec![h.fila("Ingresos íntegros", Some(t.integros), h.cas.trabajo.integros, Tipo::Normal)];
     l.push(h.fila("en dinero", Some(t.dinerario), h.cas.trabajo.dinerario, Tipo::Sub));
     if t.especie.abs() > DIF {
@@ -136,11 +146,11 @@ fn seccion_trabajo(h: &Hoja, r: &Renta) -> Seccion {
     l.push(h.fila("Rendimiento neto", t.neto, h.cas.trabajo.neto, Tipo::Fuerte));
     l.push(h.fila("Rendimiento neto reducido", t.neto_reducido, h.cas.trabajo.reducido, Tipo::Normal));
     l.push(h.fila("Retenciones", t.retenciones, h.cas.ret_trabajo, Tipo::Normal));
-    ("Trabajo", l)
+    ("trabajo", l)
 }
 
 fn seccion_actividad(h: &Hoja, r: &Renta) -> Seccion {
-    let Some(a) = &r.actividad else { return ("Autónomo", h.nota("Sin rendimientos como autónomo (o no se pudieron leer).")) };
+    let Some(a) = &r.actividad else { return ("autónomo", h.nota("Sin rendimientos como autónomo (o no se pudieron leer).")) };
     let mut l = Vec::new();
     let iae = if a.iae.is_empty() { String::new() } else { format!("IAE {}", a.iae) };
     let que: Vec<&str> = [a.modalidad.as_str(), iae.as_str(), a.tipo.as_str()].into_iter().filter(|x| !x.is_empty()).collect();
@@ -156,11 +166,11 @@ fn seccion_actividad(h: &Hoja, r: &Renta) -> Seccion {
         l.push(h.fila("Reducción", a.reduccion, h.cas.actividad.reduccion, Tipo::Normal));
     }
     l.push(h.fila("Rendimiento neto reducido", a.neto_reducido, h.cas.actividad.reducido, Tipo::Normal));
-    ("Autónomo", l)
+    ("autónomo", l)
 }
 
 fn seccion_capital(h: &Hoja, r: &Renta) -> Seccion {
-    let Some(k) = &r.capital else { return ("Capital mobiliario", h.nota("Sin intereses ni dividendos (o no se pudieron leer).")) };
+    let Some(k) = &r.capital else { return ("capital mobiliario", h.nota("Sin intereses ni dividendos (o no se pudieron leer).")) };
     let mut l = Vec::new();
     if k.solo_total {
         l.extend(h.nota("Conjunta con rendimientos de los dos: solo se sabe el total."));
@@ -172,11 +182,11 @@ fn seccion_capital(h: &Hoja, r: &Renta) -> Seccion {
         l.push(h.fila("Gastos", Some(k.gastos), h.cas.capital.gastos, Tipo::Sub));
     }
     l.push(h.fila("Rendimiento neto", Some(k.neto), h.cas.capital.ahorro, Tipo::Fuerte));
-    ("Capital mobiliario", l)
+    ("capital mobiliario", l)
 }
 
 fn seccion_ganancias(h: &Hoja, r: &Renta) -> Seccion {
-    let Some(g) = &r.ganancias else { return ("Ganancias patrimoniales", h.nota("Sin ganancias ni pérdidas (o no se pudieron leer).")) };
+    let Some(g) = &r.ganancias else { return ("ganancias patrimoniales", h.nota("Sin ganancias ni pérdidas (o no se pudieron leer).")) };
     let mut l = vec![
         h.fila("Ganancias", Some(g.ganancias), h.cas.ganancias.ganancias, Tipo::Normal),
         h.fila("Pérdidas", Some(g.perdidas), h.cas.ganancias.perdidas, Tipo::Normal),
@@ -195,13 +205,13 @@ fn seccion_ganancias(h: &Hoja, r: &Renta) -> Seccion {
             l.push(h.fila("compensado con otros años", Some(-compensado), None, Tipo::Sub));
         }
     }
-    ("Ganancias patrimoniales", l)
+    ("ganancias patrimoniales", l)
 }
 
 fn seccion_inmuebles(h: &Hoja, r: &Renta) -> Seccion {
     let Some(i) = &r.inmuebles else {
         let t = "Sin alquileres ni inmuebles.";
-        return ("Inmuebles y alquileres", h.nota(t));
+        return ("inmuebles y alquileres", h.nota(t));
     };
     let mut l = vec![
         h.fila("Alquileres cobrados", Some(i.ingresos), h.cas.inmuebles.ingresos, Tipo::Normal),
@@ -213,7 +223,7 @@ fn seccion_inmuebles(h: &Hoja, r: &Renta) -> Seccion {
     if i.imputaciones > DIF {
         l.extend(h.nota("La renta imputada es de los inmuebles que no tienes alquilados: suma a la base, pero no es dinero que cobres."));
     }
-    ("Inmuebles y alquileres", l)
+    ("inmuebles y alquileres", l)
 }
 
 fn seccion_bases(h: &Hoja, r: &Renta) -> Seccion {
@@ -241,7 +251,7 @@ fn seccion_bases(h: &Hoja, r: &Renta) -> Seccion {
         let nombre = crate::hacienda::irpf::nombre_comunidad(&r.comunidad);
         l.extend(h.nota(&format!("Comunidad: {nombre}")));
     }
-    ("Bases imponibles", l)
+    ("bases imponibles", l)
 }
 
 fn secciones(h: &Hoja, r: &Renta) -> Vec<Seccion> {
@@ -255,7 +265,7 @@ fn juntar(v: Vec<Seccion>) -> Vec<Line<'static>> {
         if i > 0 {
             l.push(Line::from(""));
         }
-        l.push(Line::styled(t, tema::titulo()));
+        l.push(titulo_bloque(t));
         l.extend(s);
     }
     l
@@ -265,10 +275,10 @@ fn juntar(v: Vec<Seccion>) -> Vec<Line<'static>> {
 pub(super) fn lineas(y: i32, r: &Renta, presentada: Option<&str>, w: usize, dos: bool) -> Vec<Line<'static>> {
     let ancho = if dos { w * 2 + 3 } else { w };
     let partido = |t: &str, st: Style| partir(t, ancho).into_iter().map(move |l| Line::styled(l, st)).collect::<Vec<_>>();
-    let mut l = vec![Line::styled(format!("Tu Renta de {y}, casilla a casilla"), tema::titulo())];
+    let mut l = vec![titulo_bloque(format!("tu Renta de {y}, casilla a casilla"))];
     let x = r.resultado;
     let et = if x > DIF { "A pagar" } else if x < -DIF { "A devolver" } else { "Resultado" };
-    let mut v = vec![Span::styled(format!("{et} {}", fmt::eur(x.abs())), tema::importe(x).add_modifier(Modifier::BOLD))];
+    let mut v = vec![Span::styled(format!("{et} {}", fmt::eur(x.abs())), color_resultado(x).add_modifier(Modifier::BOLD))];
     if let Some(fecha) = presentada {
         v.push(Span::styled(format!(" · presentada {}", cuando(fecha)), tema::apagado()));
     }
@@ -320,12 +330,97 @@ pub(super) fn abrir_pdf(ctx: &mut Ctx, anio: i32) {
     }
 }
 
-/// Barras horizontales por año: a la derecha del eje lo que salió a pagar (rojo), a la izquierda lo devuelto (verde);
-/// sin Renta, «—». Si no cabe, se quitan las cifras y luego los años que no se ven. `pie`, abajo a la derecha.
-pub(super) fn dibujar_grafico(f: &mut Frame, area: Rect, datos: &[(i32, Option<f64>)], sel: Option<i32>, pie: &str) {
-    let b = bloque("Lo que salió en tu Renta").title_bottom(Line::styled(pie.to_string(), tema::apagado()).right_aligned());
-    let dentro = b.inner(area);
-    f.render_widget(b, area);
+/* ---------------- el recibo: por qué sale lo que sale ---------------- */
+
+/// Dónde acaban las cifras del recibo y de la banda del detalle (contando desde la izquierda)…
+pub(super) const FIN: u16 = 46;
+/// …y dónde empieza lo que va al lado (las notas de la banda, las barras del recibo).
+pub(super) const AL_LADO: usize = 50;
+
+/// «Por qué» sale lo que sale en tu Renta, como un recibo con puntos guía: lo que ganaste (`ganaste`, con su
+/// `nota`), lo que te cuenta Hacienda (las bases), lo que te tocaba pagar y lo que ya habías adelantado; debajo de
+/// una raya, lo que salió. Si `w` deja sitio, al lado de lo que te tocaba y de lo adelantado, dos barras finas que
+/// los comparan (lo verde es lo que te devuelven).
+pub(super) fn recibo(r: &Renta, ganaste: f64, nota: &str, w: usize) -> Vec<Line<'static>> {
+    let fin = FIN.min(w as u16);
+    let gris = tema::apagado();
+    let sub = |t: &str| Line::styled(format!("  {t}"), gris);
+    let mut l = vec![guia("ganaste", crate::informe::anio::euro(ganaste), Style::new(), fin)];
+    if !nota.is_empty() {
+        l.push(sub(nota));
+    }
+    let bases = r.bases.as_ref().map(|b| (b.general, b.ahorro)).or(r.cuotas.as_ref().map(|q| (q.base_general, q.base_ahorro)));
+    if let Some((general, ahorro)) = bases {
+        l.push(guia("a Hacienda le cuentan", fmt::eur(general), Style::new(), fin));
+        l.push(sub("quitando gastos y Seguridad Social"));
+        if ahorro.abs() > DIF {
+            l.push(guia("y del ahorro", fmt::eur(ahorro), Style::new(), fin));
+        }
+    }
+    l.push(Line::from(""));
+    let (toca, adelantado) = (r.cuota, pagos_cuenta(r));
+    let mut tocaba = guia("te tocaba pagar", fmt::eur(toca), Style::new().fg(tema::AVISO), fin);
+    let mut habias = guia("ya habías adelantado", fmt::eur(adelantado), Style::new().fg(tema::AZUL), fin);
+    // Las barras: lo que te tocaba, y lo adelantado (lo que pasa de lo que te tocaba, en verde: es lo que vuelve).
+    let mayor = toca.max(adelantado);
+    let ancho = w.saturating_sub(AL_LADO + 2).min(46);
+    if ancho >= 10 && toca > DIF && adelantado > DIF {
+        let largo = |x: f64| ((x / mayor) * ancho as f64).round().max(1.0) as u16;
+        for (linea, tramos, x) in [(&mut tocaba, vec![(toca, tema::AVISO)], toca), (&mut habias, vec![(toca.min(adelantado), tema::AZUL), ((adelantado - toca).max(0.0), tema::BIEN)], adelantado)] {
+            let hueco = AL_LADO.saturating_sub(linea.width());
+            linea.push_span(Span::raw(" ".repeat(hueco)));
+            linea.spans.extend(barra(&tramos, largo(x)).spans);
+        }
+    }
+    l.extend([tocaba, habias]);
+    // Lo que no sale de restar las dos de arriba: otras deducciones o lo de la declaración anterior.
+    if (toca - adelantado - r.diferencial).abs() > DIF {
+        l.push(guia("cuota diferencial", fmt::eur(r.diferencial), Style::new(), fin));
+    }
+    if r.rectificativa {
+        for (et, x) in [("ya pagado con la anterior", r.pagado_antes), ("ya devuelto con la anterior", r.devuelto_antes)] {
+            if x.abs() > DIF {
+                l.push(guia(et, fmt::eur(x), Style::new(), fin));
+            }
+        }
+    }
+    let x = r.resultado;
+    let cifra = fmt::eur(x.abs());
+    let raya = cifra.chars().count().max(11);
+    l.push(Line::styled(format!("{}{}", " ".repeat((fin as usize).saturating_sub(raya)), "─".repeat(raya)), Style::new().fg(tema::PUNTOS)));
+    let st = color_resultado(x);
+    let et = if x > DIF { "a pagar" } else if x < -DIF { "para ti" } else { "a cero" };
+    l.push(guia(Span::styled(et, st.add_modifier(Modifier::BOLD)), cifra, st, fin));
+    l
+}
+
+/// Lo que va al lado de la banda del detalle: cómo se pagó o se cobró y, si corrige otra, cuál.
+pub(super) fn notas_banda(r: &Renta) -> Vec<String> {
+    let mut v = Vec::new();
+    // Si te devuelven, ya lo dice la banda.
+    if let Some(t) = forma_de_pago(r).filter(|_| !r.forma.is_some_and(|f| f.devuelve())) {
+        v.push(format!("forma de pago: {t}."));
+    }
+    if r.rectificativa {
+        v.push(if r.anterior.is_empty() { "Rectificativa.".into() } else { format!("Rectificativa de la {}.", r.anterior) });
+    } else if !r.anterior.is_empty() {
+        v.push(format!("Corrige la {}.", r.anterior));
+    }
+    v
+}
+
+/// Barras finas por año («▄»): a la derecha del eje, lo que salió a pagar (en AVISO); a la izquierda, lo devuelto
+/// (en verde); sin Renta, «—». Sin caja: arriba, el título en gris y, a la derecha, `g` con `siguiente`. Si no
+/// cabe, se quitan las cifras y luego los años que no se ven.
+pub(super) fn dibujar_grafico(f: &mut Frame, area: Rect, datos: &[(i32, Option<f64>)], sel: Option<i32>, siguiente: &str) {
+    let titulo = "lo que salió en tu Renta";
+    let a_tit = Rect { height: area.height.min(1), ..area };
+    let dentro = Rect { y: area.y + a_tit.height, height: area.height - a_tit.height, ..area };
+    f.render_widget(Paragraph::new(titulo_bloque(titulo)), a_tit);
+    let teclas = linea_atajos(&[("g", siguiente)]);
+    if titulo.chars().count() + 3 + teclas.width() <= a_tit.width as usize {
+        f.render_widget(Paragraph::new(teclas.right_aligned()), a_tit);
+    }
     if dentro.height == 0 || dentro.width < 12 || datos.is_empty() {
         return;
     }
@@ -368,38 +463,24 @@ pub(super) fn dibujar_grafico(f: &mut Frame, area: Rect, datos: &[(i32, Option<f
     };
     let der = util - izq;
     let escala = if neg + pos > 0.0 { if neg > 0.0 && pos > 0.0 { util as f64 / (neg + pos) } else { util as f64 / neg.max(pos) } } else { 0.0 };
-    const OCTAVOS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    // Lo que ocupa una barra, en celdas enteras (al menos una, si hay algo).
+    let celdas = |largo: f64, tope: usize| (largo.round() as usize).max(1).min(tope);
 
     let mut lineas: Vec<Line> = Vec::new();
     for (anio, x) in datos.iter().skip(ini).take(filas) {
         let elegido = Some(*anio) == sel;
-        let st_anio = if elegido { Style::new().fg(tema::ACENTO).add_modifier(Modifier::BOLD) } else { tema::apagado() };
+        let st_anio = if elegido { tema::titulo() } else { tema::apagado() };
         let mut v = vec![Span::styled(format!("{anio} "), st_anio)];
-        let color = x.map_or(Style::new(), tema::importe);
+        let color = x.map_or(tema::apagado(), color_resultado);
         let largo = x.map(|x| x.abs() * escala).unwrap_or(0.0);
-        // Lado izquierdo (devoluciones): bloques llenos pegados al eje, con medio bloque si sobra.
-        let (llenos_i, medio) = if x.is_some_and(|x| x < -0.005) {
-            let ll = (largo.floor() as usize).min(izq);
-            (ll, ll < izq && (largo - ll as f64 >= 0.5 || ll == 0))
-        } else {
-            (0, false)
-        };
-        let usados = llenos_i + usize::from(medio);
-        v.push(Span::raw(" ".repeat(izq - usados)));
-        if medio {
-            v.push(Span::styled("▐", color));
-        }
-        v.push(Span::styled("█".repeat(llenos_i), color));
-        v.push(Span::styled("│", tema::apagado()));
-        // Lado derecho (a pagar): bloques llenos y el octavo que sobre.
-        let mut ocupado = 0;
-        if x.is_some_and(|x| x > 0.005) {
-            let ll = (largo.floor() as usize).min(der);
-            let oct = if ll < der { ((largo - ll as f64) * 8.0).round().clamp(0.0, 7.0) as usize } else { 0 };
-            let oct = if ll == 0 && oct == 0 { 1 } else { oct };
-            v.push(Span::styled(format!("{}{}", "█".repeat(ll), OCTAVOS[oct]), color));
-            ocupado = ll + usize::from(oct > 0);
-        }
+        // Lado izquierdo (devoluciones), pegado al eje.
+        let llenos_i = if x.is_some_and(|x| x < -0.005) { celdas(largo, izq) } else { 0 };
+        v.push(Span::raw(" ".repeat(izq - llenos_i)));
+        v.push(Span::styled("▄".repeat(llenos_i), color));
+        v.push(Span::styled("│", Style::new().fg(tema::MARCO)));
+        // Lado derecho (a pagar).
+        let ocupado = if x.is_some_and(|x| x > 0.005) { celdas(largo, der) } else { 0 };
+        v.push(Span::styled("▄".repeat(ocupado), color));
         if val_w > 0 {
             v.push(Span::raw(" ".repeat(der.saturating_sub(ocupado) + 1)));
             let t = cifra(*x, larga);
@@ -409,12 +490,9 @@ pub(super) fn dibujar_grafico(f: &mut Frame, area: Rect, datos: &[(i32, Option<f
         lineas.push(Line::from(v));
     }
     if leyenda {
-        lineas.push(Line::from(vec![
-            Span::styled("█", Style::new().fg(tema::MAL)),
-            Span::styled(" a pagar  ", tema::apagado()),
-            Span::styled("█", Style::new().fg(tema::BIEN)),
-            Span::styled(" a devolver", tema::apagado()),
-        ]));
+        let mut l = Line::from(vec![muestra(tema::AVISO), Span::styled("a pagar   ", tema::apagado()), muestra(tema::BIEN), Span::styled("a devolver", tema::apagado())]);
+        l.spans.insert(0, Span::raw(" ".repeat(5)));
+        lineas.push(l);
     }
     f.render_widget(Paragraph::new(lineas), dentro);
 }
@@ -423,20 +501,53 @@ pub(super) fn dibujar_grafico(f: &mut Frame, area: Rect, datos: &[(i32, Option<f
 mod tests {
     use super::*;
 
+    fn texto(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn el_recibo_de_una_renta() {
+        // Como en el boceto: te tocaban 3.121,24 €, habías adelantado 3.736,42 € y te devuelven 615,18 €.
+        let pagos = crate::dominio::renta::Pagos { total: 3736.42, ..Default::default() };
+        let mut r = Renta { cuota: 3121.24, pagos_cuenta: 3736.42, diferencial: -615.18, resultado: -615.18, pagos: Some(pagos), ..Default::default() };
+        r.bases = Some(crate::dominio::renta::Bases { general: 20010.64, ahorro: 0.0 });
+        let l: Vec<String> = recibo(&r, 29686.40, "antes de impuestos", 96).iter().map(texto).collect();
+        let fila = |et: &str| l.iter().find(|x| x.starts_with(et)).unwrap_or_else(|| panic!("falta «{et}»: {l:#?}")).clone();
+        // Las cifras acaban todas en la misma columna, con puntos guía hasta ellas.
+        for (et, cifra) in [("ganaste", "29.686,40 €"), ("a Hacienda le cuentan", "20.010,64 €"), ("te tocaba pagar", "3.121,24 €"), ("ya habías adelantado", "3.736,42 €"), ("para ti", "615,18 €")] {
+            let f = fila(et);
+            let fin = f.find(cifra).map(|i| f[..i].chars().count() + cifra.chars().count());
+            assert_eq!(fin, Some(FIN as usize), "{f}");
+            assert!(f.contains('·'), "{f}");
+        }
+        // Al lado, las barras; sin la base del ahorro (es cero) ni la cuota diferencial (sale de restar).
+        assert!(fila("te tocaba pagar").contains('▄') && fila("ya habías adelantado").contains('▄'));
+        assert!(!l.iter().any(|x| x.starts_with("y del ahorro") || x.starts_with("cuota diferencial")), "{l:#?}");
+        // Estrecho: sin barras y sin pasarse.
+        let estrecho: Vec<String> = recibo(&r, 29686.40, "", 40).iter().map(texto).collect();
+        assert!(estrecho.iter().all(|x| x.chars().count() <= 40 && !x.contains('▄')), "{estrecho:#?}");
+        // A pagar, y con algo que no sale de restar: se enseña la cuota diferencial.
+        let r = Renta { cuota: 2000.0, pagos_cuenta: 1500.0, diferencial: 400.0, resultado: 400.0, ..r };
+        let l: Vec<String> = recibo(&r, 29686.40, "", 96).iter().map(texto).collect();
+        assert!(l.iter().any(|x| x.starts_with("a pagar") && x.ends_with("400,00 €")), "{l:#?}");
+        assert!(l.iter().any(|x| x.starts_with("cuota diferencial")), "{l:#?}");
+    }
+
     #[test]
     fn grafico_divergente() {
-        // Con resultados de los dos signos, el eje queda en medio y cada barra va a su lado.
+        // Con resultados de los dos signos, el eje queda en medio y cada barra va a su lado (el título, sin caja, en
+        // la primera fila).
         let datos = [(2025, Some(1000.0)), (2024, Some(-500.0)), (2023, None)];
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 6)).unwrap();
-        t.draw(|f| dibujar_grafico(f, f.area(), &datos, Some(2024), " g ")).unwrap();
+        t.draw(|f| dibujar_grafico(f, f.area(), &datos, Some(2024), "por conceptos")).unwrap();
         let b = t.backend().buffer();
         let fila = |y: u16| (0..60).map(|x| b[(x, y)].symbol().to_string()).collect::<String>();
         let (l25, l24) = (fila(1), fila(2));
         let eje = |s: &str| s.chars().position(|c| c == '│').unwrap();
         assert_eq!(eje(&l25[3..]), eje(&l24[3..]), "{l25}\n{l24}");
         assert!(l25.contains("1.000 € a pagar") && l24.contains("500 € a devolver"), "{l25}\n{l24}");
-        let i25 = l25.chars().position(|c| c == '█').unwrap();
-        let i24 = l24.chars().position(|c| c == '█').unwrap();
+        let i25 = l25.chars().position(|c| c == '▄').unwrap();
+        let i24 = l24.chars().position(|c| c == '▄').unwrap();
         assert!(i24 < i25, "{l25}\n{l24}");
     }
 }

@@ -49,19 +49,24 @@ fn hace_meses(n: u32) -> String {
     fmt::mes_mas(fmt::ym(&hoy()), -(n as i32))
 }
 
-pub fn inicio(d: &Datos, cert: Option<&Certificado>) -> Inicio {
-    let mut o = Inicio::default();
-    // Quién.
+/// El nombre para saludar («Hola, Ana»): el de pila del certificado; sin él, el primero del nombre de pila del
+/// perfil; y si tampoco, el nombre entero. Vacío si no hay ninguno.
+pub fn saludo(d: &Datos, cert: Option<&Certificado>) -> String {
     // Un nombre de pila de una letra no es un nombre.
     let pila = d.perfil.nombre_pila.trim().to_string();
     let pila = if pila.chars().count() < 2 { String::new() } else { pila };
-    o.nombre = match cert {
+    match cert {
         Some(c) => c.saludo(),
         None if !pila.is_empty() => crate::red::certificado::titulo(pila.split_whitespace().next().unwrap_or("")),
         // Sin nombre de pila no se sabe qué palabra es el nombre (a veces van primero los apellidos): entero.
         None if d.perfil.nombre.trim().chars().count() > 2 => d.perfil.nombre.trim().to_string(),
         None => String::new(),
-    };
+    }
+}
+
+pub fn inicio(d: &Datos, cert: Option<&Certificado>) -> Inicio {
+    // Quién.
+    let mut o = Inicio { nombre: saludo(d, cert), ..Default::default() };
 
     // Empleo: la última nómina con liquidación.
     let meses = &d.tgss.nomina.meses;

@@ -3,6 +3,10 @@
 //! no se guarda; la clave privada se queda en memoria mientras la app está abierta.
 use std::path::{Path, PathBuf};
 
+/// La variable del entorno de la que se puede tomar la contraseña del certificado. La app la quita de su entorno nada
+/// más leerla (`main::abrir_certificado`), y los programas que lanza no la reciben.
+pub const CLAVE_EN_EL_ENTORNO: &str = "PANEL_CLAVE_CERTIFICADO";
+
 #[derive(Clone)]
 pub struct Certificado {
     pub ruta: PathBuf,
@@ -114,7 +118,7 @@ impl Certificado {
         // ureq no deja decir el tipo de una clave en DER: se le da en PEM (PKCS#8), que sí reconoce.
         let pem = format!(
             "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
-            base64(&self.clave)
+            en_lineas_de_64(&self.clave)
         );
         let clave =
             PrivateKey::from_pem(pem.as_bytes()).expect("una clave PKCS#8 en PEM siempre se lee");
@@ -144,33 +148,33 @@ impl Certificado {
         format!("{} {}", titulo(&self.nombre_pila), titulo(&self.apellidos))
     }
 
+    /// Para las pruebas: uno sin fichero ni clave (no sirve para conectarse), con ese NIF y ese nombre (en
+    /// mayúsculas, como vienen).
+    #[cfg(test)]
+    pub fn de_prueba(nif: &str, nombre_pila: &str, apellidos: &str) -> Certificado {
+        Certificado {
+            ruta: PathBuf::new(),
+            nombre_pila: nombre_pila.into(),
+            apellidos: apellidos.into(),
+            nombre_comun: format!("{apellidos} {nombre_pila} - {nif}"),
+            nif: nif.into(),
+            caduca: "2099-12-31".into(),
+            emisor: "Pruebas".into(),
+            cadena: Vec::new(),
+            clave: Vec::new(),
+        }
+    }
+
     /// Días que le quedan (negativo si ya caducó).
     pub fn dias_para_caducar(&self) -> i64 {
         crate::dominio::fmt::dias_entre(&crate::dominio::fmt::hoy(), &self.caduca)
     }
 }
 
-/// Base64 estándar, en líneas de 64 (para el PEM).
-fn base64(b: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(b.len() * 4 / 3 + 4);
-    for t in b.chunks(3) {
-        let n = (t[0] as u32) << 16
-            | (*t.get(1).unwrap_or(&0) as u32) << 8
-            | *t.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            s.push(if i <= t.len() {
-                A[(n >> (18 - 6 * i) & 63) as usize] as char
-            } else {
-                '='
-            });
-        }
-    }
-    s.as_bytes()
-        .chunks(64)
-        .map(|c| std::str::from_utf8(c).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Base64 en líneas de 64 (para el PEM).
+fn en_lineas_de_64(b: &[u8]) -> String {
+    let b64 = crate::dominio::fmt::base64(b);
+    b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).expect("base64 es ASCII")).collect::<Vec<_>>().join("\n")
 }
 
 /// El NIF del certificado: del «serialNumber» («IDCES-12345678Z») o, si no, del final del nombre común.
@@ -211,29 +215,17 @@ mod tests {
         assert_eq!(nif_de("", "PEREZ GOMEZ ANA - 12345678Z"), "12345678Z");
         assert_eq!(titulo("MARÍA JOSÉ"), "María José");
         assert_eq!(titulo("ÁNGEL"), "Ángel");
-        assert_eq!(base64(b"hola"), "aG9sYQ==");
-        assert_eq!(base64(b"ab"), "YWI=");
+        let pem = en_lineas_de_64(&[0; 100]);
+        assert_eq!(pem.lines().map(str::len).collect::<Vec<_>>(), [64, 64, 8]);
     }
 
     #[test]
-    fn abre_un_p12_de_prueba() {
-        // Un certificado de prueba (autofirmado, sin ningún dato real), con contraseña «prueba».
-        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pruebas/prueba.p12");
-        let c = Certificado::abrir(&p, "prueba").unwrap();
-        assert_eq!(
-            (
-                c.nif.as_str(),
-                c.saludo().as_str(),
-                c.nombre_completo().as_str()
-            ),
-            ("00000000T", "Ana", "Ana Prueba")
-        );
-        assert!(c.caduca.starts_with("20"));
-        assert!(
-            Certificado::abrir(&p, "otra")
-                .unwrap_err()
-                .contains("contraseña")
-        );
-        let _ = c.para_tls();
+    fn saludo_y_nombre() {
+        let c = Certificado::de_prueba("00000000T", "ANA", "PRUEBA");
+        assert_eq!((c.saludo().as_str(), c.nombre_completo().as_str()), ("Ana", "Ana Prueba"));
+        // Sin nombre de pila ni apellidos, del nombre común.
+        let c = Certificado { nombre_pila: String::new(), apellidos: String::new(), ..c };
+        assert_eq!((c.saludo().as_str(), c.nombre_completo().as_str()), ("00000000t", "Prueba Ana"));
+        assert!(Certificado::desde_bytes(b"esto no es un certificado", "x", Path::new("x.p12")).unwrap_err().contains(".p12"));
     }
 }

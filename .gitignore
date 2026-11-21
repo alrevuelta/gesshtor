@@ -2,7 +2,6 @@
 /mock
 *.p12
 *.pfx
-!/pruebas/prueba.p12
 cache.json
 .panel.lock
 .DS_Store
@@ -12,5 +11,9 @@ cache.json
 datos.json
 !/pruebas/*/datos.json
 justificantes/
+fuentes/
+!/pruebas/*/fuentes/
 copias/
 documentos/
+# Lo que deja la prueba `captura` si no se le da SALIDA.
+/captura.json

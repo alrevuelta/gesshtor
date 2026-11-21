@@ -92,26 +92,26 @@ impl Estado {
         matches!(self, Estado::Presentado(_) | Estado::NoToca(_))
     }
 
-    /// «presentado el 15/10», «en plazo hasta 20/10», «vencido el 20/07», «aún no», «antes del alta»…
+    /// «presentado el 15 oct», «en plazo hasta el 20 oct», «vencido el 20 jul», «aún no», «antes del alta»…
     pub fn texto(&self, plazo_ini: &str, plazo_fin: &str) -> String {
         match self {
             Estado::Presentado(f) if f.is_empty() => "presentado".into(),
-            Estado::Presentado(f) => format!("presentado el {}", dm(f)),
+            Estado::Presentado(f) => format!("presentado el {}", dia_mes(f)),
             Estado::NoToca(m) => m.to_string(),
             Estado::Futuro => "aún no".into(),
             Estado::EnCurso => "en curso".into(),
-            Estado::Proximo => format!("plazo desde el {}", dm(plazo_ini)),
-            Estado::EnPlazo(_) => format!("en plazo hasta {}", dm(plazo_fin)),
-            Estado::Vencido => format!("vencido el {}", dm(plazo_fin)),
+            Estado::Proximo => format!("plazo desde el {}", dia_mes(plazo_ini)),
+            Estado::EnPlazo(_) => format!("en plazo hasta el {}", dia_mes(plazo_fin)),
+            Estado::Vencido => format!("vencido el {}", dia_mes(plazo_fin)),
             Estado::SinDatos => "sin datos".into(),
         }
     }
 
-    /// Para columnas estrechas: «✓ 15/10», «en plazo», «vencido»…
+    /// Para columnas estrechas: «✓ 15 oct», «en plazo», «vencido»…
     pub fn corto(&self) -> String {
         match self {
             Estado::Presentado(f) if f.is_empty() => "✓".into(),
-            Estado::Presentado(f) => format!("✓ {}", dm(f)),
+            Estado::Presentado(f) => format!("✓ {}", dia_mes(f)),
             Estado::NoToca("exento") => "exento".into(),
             Estado::NoToca(_) => "no toca".into(),
             Estado::Futuro => "aún no".into(),
@@ -129,7 +129,7 @@ impl Estado {
             Estado::NoToca(_) | Estado::Futuro | Estado::SinDatos => tema::apagado(),
             Estado::EnCurso | Estado::Proximo => Style::new(),
             Estado::EnPlazo(d) if *d <= 7 => Style::new().fg(tema::AVISO).add_modifier(Modifier::BOLD),
-            Estado::EnPlazo(_) => Style::new().fg(tema::ACENTO),
+            Estado::EnPlazo(_) => Style::new().fg(tema::acento()),
             Estado::Vencido => Style::new().fg(tema::MAL).add_modifier(Modifier::BOLD),
         }
     }
@@ -149,17 +149,17 @@ impl Estado {
 }
 
 /// Una sola frase para el 303 y el 130 de un trimestre: si van igual, una; si no, cada uno con lo suyo
-/// (`corto`: más breve, para tablas estrechas).
+/// (`corto`: más breve, para tablas estrechas: «✓ 15 oct», «vencido»).
 pub fn estado_conjunto(e303: &Estado, e130: &Estado, p: &Plazo, corto: bool) -> (String, Style) {
     let t = |e: &Estado| e.texto(&p.ini, &p.fin);
     let t2 = |e: &Estado| if corto { e.corto() } else { t(e) };
     if e303.hecho() && e130.hecho() {
         // Lo que cuenta es la presentación (el 130 exento no dice nada nuevo: ya sale en su columna).
         let e = if matches!(e303, Estado::Presentado(_)) || !matches!(e130, Estado::Presentado(_)) { e303 } else { e130 };
-        return (t(e), e.estilo());
+        return (t2(e), e.estilo());
     }
     if std::mem::discriminant(e303) == std::mem::discriminant(e130) {
-        return (t(e303), e303.estilo());
+        return (t2(e303), e303.estilo());
     }
     if e130.hecho() {
         return (format!("303 {}", t2(e303)), e303.estilo());
@@ -260,7 +260,7 @@ pub fn pdf(dir: &Path, d: &Datos, anio: i32, q: u32, modelo: Modelo) -> Option<P
 
 /// ¿Hay facturas o gastos entre esas fechas?
 pub fn hay_actividad(d: &Datos, ini: &str, fin: &str) -> bool {
-    factura::emitidas(d).any(|f| fmt::en_rango(f.devengo(), ini, fin)) || d.gastos.iter().any(|g| fmt::en_rango(&g.fecha, ini, fin))
+    factura::emitidas(d).any(|f| fmt::en_rango(f.devengo(), ini, fin)) || crate::dominio::gasto::apuntados(d).any(|g| fmt::en_rango(&g.fecha, ini, fin))
 }
 
 /// Un trimestre ya empezado con algo por presentar.
@@ -354,6 +354,19 @@ pub fn dia_mes(s: &str) -> String {
     }
 }
 
+/// Un plazo, como en los bocetos: «del 1 al 20 oct», «del 1 ene al 1 feb 2027». El año solo sale si no es `anio`.
+pub fn del_al(ini: &str, fin: &str, anio: i32) -> String {
+    use chrono::Datelike;
+    let (Some(a), Some(b)) = (fmt::fecha(ini), fmt::fecha(fin)) else { return rango(ini, fin) };
+    let y = if b.year() == anio { String::new() } else { format!(" {}", b.year()) };
+    let mes = |d: chrono::NaiveDate| fmt::MESES_C[d.month0() as usize];
+    if (a.year(), a.month()) == (b.year(), b.month()) {
+        format!("del {} al {} {}{y}", a.day(), b.day(), mes(b))
+    } else {
+        format!("del {} {} al {} {}{y}", a.day(), mes(a), b.day(), mes(b))
+    }
+}
+
 /// «1 jul – 30 sep 2026» (con el año en los dos lados si no es el mismo).
 pub fn rango(ini: &str, fin: &str) -> String {
     if fmt::anio_de(ini) == fmt::anio_de(fin) {
@@ -406,9 +419,15 @@ pub fn texto130(v: f64, corto: bool) -> String {
     }
 }
 
-/// Rojo si sale a pagar, verde si es a tu favor.
+/// Del color de la sección si sale a pagar, verde si es a tu favor y en gris si es cero.
 pub fn estilo_resultado(v: f64) -> Style {
-    if v.abs() <= DIF { tema::apagado() } else { tema::importe(v) }
+    if v > DIF {
+        Style::new().fg(tema::acento())
+    } else if v < -DIF {
+        Style::new().fg(tema::BIEN)
+    } else {
+        tema::apagado()
+    }
 }
 
 #[cfg(test)]
@@ -457,18 +476,20 @@ mod tests {
     #[test]
     fn textos_del_estado() {
         let p = plazo(2026, 3);
-        assert_eq!(Estado::Presentado("2026-10-15".into()).texto(&p.ini, &p.fin), "presentado el 15/10");
-        assert_eq!(Estado::EnPlazo(3).texto(&p.ini, &p.fin), "en plazo hasta 20/10");
+        assert_eq!(Estado::Presentado("2026-10-15".into()).texto(&p.ini, &p.fin), "presentado el 15 oct");
+        assert_eq!(Estado::EnPlazo(3).texto(&p.ini, &p.fin), "en plazo hasta el 20 oct");
         assert_eq!(Estado::NoToca("antes del alta").texto(&p.ini, &p.fin), "antes del alta");
-        assert_eq!(Estado::Vencido.texto(&p.ini, &p.fin), "vencido el 20/10");
+        assert_eq!(Estado::Vencido.texto(&p.ini, &p.fin), "vencido el 20 oct");
         assert_eq!(Estado::Futuro.texto(&p.ini, &p.fin), "aún no");
         let pres = Estado::Presentado("2026-10-15".into());
         let (t, _) = estado_conjunto(&pres, &Estado::NoToca("exento"), &p, false);
-        assert_eq!(t, "presentado el 15/10");
+        assert_eq!(t, "presentado el 15 oct");
         let (t, _) = estado_conjunto(&pres, &Estado::Vencido, &p, false);
-        assert_eq!(t, "130 vencido el 20/10");
+        assert_eq!(t, "130 vencido el 20 oct");
         let (t, _) = estado_conjunto(&pres, &Estado::EnPlazo(2), &p, true);
         assert_eq!(t, "130 en plazo");
+        let (t, _) = estado_conjunto(&pres, &Estado::NoToca("exento"), &p, true);
+        assert_eq!(t, "✓ 15 oct");
         let (t, _) = estado_conjunto(&Estado::EnCurso, &Estado::EnCurso, &p, false);
         assert_eq!(t, "en curso");
         let (t, _) = estado_conjunto(&Estado::Vencido, &Estado::SinDatos, &p, false);
@@ -489,5 +510,7 @@ mod tests {
         assert_eq!(dias_txt(1), "mañana");
         assert_eq!(rango("2026-07-01", "2026-09-30"), "1 jul – 30 sep 2026");
         assert_eq!(rango("2026-12-31", "2027-01-30"), "31 dic 2026 – 30 ene 2027");
+        assert_eq!(del_al("2026-10-01", "2026-10-20", 2026), "del 1 al 20 oct");
+        assert_eq!(del_al("2027-01-01", "2027-02-01", 2026), "del 1 ene al 1 feb 2027");
     }
 }

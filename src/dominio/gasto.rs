@@ -1,7 +1,9 @@
 //! Los gastos de la actividad: lo que se guarda de cada uno (`Gasto`), sus categorías (con su línea de la Renta,
 //! su IVA y su % deducible por defecto) y lo que cuenta cada uno en el IVA y en el IRPF (`gasto_calc`), con las
-//! amortizaciones.
-use super::fmt::{dias_entre, fecha, r2};
+//! amortizaciones. Los recibos de autónomo de la Seguridad Social también son gastos (`con_recibos`): no se apuntan
+//! ni se guardan, salen de lo traído; y una cuota apuntada a mano en un mes con recibo no cuenta (`repetido`).
+use super::fmt::{dias_entre, fecha, nombre_mes, r2};
+use super::tgss::Recibo;
 use super::{Datos, Num};
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +39,59 @@ pub struct Gasto {
     pub iva_no_ded: bool,
     /// Factura o tique adjunto (en documentos/).
     pub doc: String,
+}
+
+/* ================= los recibos de autónomo ================= */
+
+/// Las ids de los gastos que son recibos de la Seguridad Social: «ss:» y el índice del recibo en `tgss.recibos`.
+const RECIBO: &str = "ss:";
+
+impl Gasto {
+    /// ¿Es un recibo de autónomo de la Seguridad Social? (no se cambia ni se guarda: sale de lo traído)
+    pub fn es_recibo(&self) -> bool {
+        self.id.starts_with(RECIBO)
+    }
+}
+
+/// Pone los recibos de autónomo de la Seguridad Social entre tus gastos, como cuota de autónomos y con la fecha del
+/// cargo, en lugar de los que hubiera: al cargar los datos y al traer lo último.
+pub fn con_recibos(d: &mut Datos) {
+    d.gastos.retain(|g| !g.es_recibo());
+    let recibos: Vec<Gasto> = d
+        .tgss
+        .recibos
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.importe.abs() > 0.005)
+        .map(|(i, r)| {
+            let f = r.fecha_cargo();
+            let fecha = match f.len() {
+                7 => format!("{f}-01"),
+                n if n >= 10 => f[..10].to_string(),
+                _ => f.to_string(),
+            };
+            let concepto = if r.es_cuota() && r.periodo.len() >= 7 { format!("Cuota de {}", nombre_mes(&r.periodo)) } else { r.concepto.trim().to_string() };
+            Gasto { id: format!("{RECIBO}{i}"), proveedor: "Seguridad Social".into(), concepto, categoria: "ss".into(), origen: "sin".into(), base: Num::de(r.importe), fecha, ..Default::default() }
+        })
+        .collect();
+    d.gastos.extend(recibos);
+}
+
+/// Los gastos apuntados (sin los recibos de la Seguridad Social): para saber si hay actividad. Pagar la cuota de
+/// autónomo no dice si toca presentar el 303 o el 130, ni que un año tenga datos en la app.
+pub fn apuntados(d: &Datos) -> impl Iterator<Item = &Gasto> {
+    d.gastos.iter().filter(|g| !g.es_recibo())
+}
+
+/// El recibo de la Seguridad Social de un gasto que lo es.
+pub fn recibo_de<'a>(g: &Gasto, d: &'a Datos) -> Option<&'a Recibo> {
+    g.id.strip_prefix(RECIBO)?.parse::<usize>().ok().and_then(|i| d.tgss.recibos.get(i))
+}
+
+/// Una cuota de autónomos apuntada a mano en un mes en que ya hay un recibo de la Seguridad Social: no cuenta (si
+/// no, se contaría dos veces).
+pub fn repetido(g: &Gasto, d: &Datos) -> bool {
+    g.categoria == "ss" && !g.es_recibo() && g.fecha.len() >= 7 && d.tgss.recibos.iter().any(|r| r.fecha_cargo().get(..7) == g.fecha.get(..7))
 }
 
 /* ================= categorías ================= */
@@ -163,6 +218,8 @@ pub struct GastoCalc {
     pub inversion_iva: bool,
     /// Lo que pagaste.
     pub pagado: f64,
+    /// Una cuota apuntada a mano en un mes con recibo de la Seguridad Social: no cuenta.
+    pub repetido: bool,
 }
 
 /// % de la vivienda afecto a la actividad (30 % de m² despacho ÷ m² totales).
@@ -202,10 +259,18 @@ pub fn gasto_calc(g: &Gasto, d: &Datos) -> GastoCalc {
         let lim = DIETAS.iter().find(|x| x.0 == g.dieta).or(DIETAS.first()).map(|x| x.2).unwrap_or(26.67);
         coste = coste.min(lim);
     }
+    // Un recibo de la Seguridad Social cuenta entero (y los de devolución, restando).
+    if g.es_recibo() {
+        coste = base;
+    }
     let amortizable = !cat.amort.is_empty() && base > 300.0;
     let inversion_iva = !cat.amort.is_empty() && base > 3005.06;
-    let pagado = if origen == "es" { r2(base + cuota) } else { base };
-    GastoCalc { cat, origen, base, tipo, cuota, p_iva, p_irpf, iva_ded, coste, amortizable, inversion_iva, pagado }
+    let mut pagado = if origen == "es" { r2(base + cuota) } else { base };
+    let repetido = repetido(g, d);
+    if repetido {
+        (coste, pagado) = (0.0, 0.0);
+    }
+    GastoCalc { cat, origen, base, tipo, cuota, p_iva, p_irpf, iva_ded, coste, amortizable, inversion_iva, pagado, repetido }
 }
 
 /* ================= amortizaciones ================= */
@@ -236,6 +301,32 @@ pub fn amort_en_rango(g: &Gasto, gc: &GastoCalc, desde: &str, hasta: &str) -> f6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dominio::tgss::Recibo;
+
+    /// Los recibos de autónomo entran como gastos (sin repetirse al volver a ponerlos), no se guardan, y una cuota
+    /// apuntada a mano en un mes con recibo no cuenta.
+    #[test]
+    fn los_recibos_son_gastos() {
+        let mut d = Datos::default();
+        let recibo = |periodo: &str, cargo: &str, importe: f64| Recibo { periodo: periodo.into(), concepto: "Cuota autónomos".into(), importe, cargo: cargo.into(), ..Default::default() };
+        d.tgss.recibos = vec![recibo("2026-01", "2026-01-30", 300.0), recibo("2026-02", "2026-02-27", 300.0), recibo("2026-03", "", 0.0)];
+        d.gastos.push(Gasto { id: "a".into(), categoria: "ss".into(), origen: "sin".into(), base: Num::de(300.0), fecha: "2026-02-27".into(), ..Default::default() });
+        d.gastos.push(Gasto { id: "b".into(), categoria: "ss".into(), origen: "sin".into(), base: Num::de(300.0), fecha: "2026-04-30".into(), ..Default::default() });
+        con_recibos(&mut d);
+        con_recibos(&mut d);
+        let recibos: Vec<&Gasto> = d.gastos.iter().filter(|g| g.es_recibo()).collect();
+        assert_eq!(recibos.len(), 2, "sin repetirse y sin los de 0 €");
+        assert_eq!((recibos[0].fecha.as_str(), recibos[0].concepto.as_str()), ("2026-01-30", "Cuota de enero de 2026"));
+        assert_eq!(gasto_calc(recibos[0], &d).coste, 300.0);
+        assert_eq!(recibo_de(recibos[1], &d).map(|r| r.periodo.as_str()), Some("2026-02"));
+        // La de febrero apuntada a mano no cuenta (ya está el recibo); la de abril, sí.
+        let (a, b) = (gasto_calc(&d.gastos[0], &d), gasto_calc(&d.gastos[1], &d));
+        assert!(a.repetido && a.coste == 0.0 && a.pagado == 0.0);
+        assert!(!b.repetido && b.coste == 300.0);
+        // Al guardar, solo los apuntados.
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("\"ss:") && json.contains("\"id\":\"a\"") && json.contains("\"id\":\"b\""), "{json}");
+    }
 
     #[test]
     fn categorias() {

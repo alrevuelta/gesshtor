@@ -1,5 +1,7 @@
-//! Lo que enseña la pantalla de cuotas, ya en texto: las filas de la tabla de meses, las del historial, las cifras
-//! de arriba y las notas. Se calcula una vez (al entrar o al cambiar los datos o el año), no en cada dibujo.
+//! Lo de las cuotas de autónomo en Gastos, ya en texto: al filtrar por «Cuota de autónomos», las cifras de arriba (lo
+//! pagado, la cuota y la base, los meses con cuota o la base próxima, la regularización), que van con puntos guía como
+//! las de los gastos, y las notas (lo que falta por cargar, los atrasos, la tarifa plana, los meses sin recibo); y el
+//! desglose de un recibo, en su ficha.
 use crate::dominio::fmt::DIF;
 use crate::dominio::tgss::Tgss;
 use crate::dominio::fmt::{self, eur, eur0};
@@ -7,26 +9,12 @@ use crate::dominio::tgss::Recibo;
 use crate::informe::autonomo::{self, CuotasAnio, EstadoMes};
 use crate::tui::impuestos_trimestre::{dia_mes, dm, y_lista};
 use crate::tui::widgets::tema;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 
 
-/// Columnas de la tabla de meses (el desglose por conceptos, al abrir un recibo).
-pub const CABECERAS: [&str; 3] = ["Mes", "Importe", "Cargo"];
-
-/// Una fila de la tabla de meses.
-pub struct Fila {
-    pub celdas: [String; 3],
-    pub estilo: Style,
-    /// El estilo de la primera celda (los atrasos van en cursiva).
-    pub estilo_mes: Style,
-    /// El recibo de la fila, si lo hay (para su desglose).
-    pub recibo: Option<Recibo>,
-}
-
-/// Una cifra de arriba: etiqueta, valor, nota y estilo del valor.
+/// Una cifra de arriba: etiqueta (en minúscula: va con puntos guía), valor, nota y estilo del valor.
 pub struct Cifra {
     pub etiqueta: String,
-    pub corta: String,
     pub valor: String,
     pub nota: String,
     pub estilo: Style,
@@ -38,83 +26,15 @@ pub struct Nota {
     pub estilo: Style,
 }
 
-/// «2025-09» → «sep 25».
-fn mes_corto(ym: &str) -> String {
-    let m = fmt::mes_de(&format!("{ym}-01"));
-    match (m, ym.get(2..4)) {
-        (1..=12, Some(a)) => format!("{} {a}", fmt::MESES_C[m as usize - 1]),
-        _ => ym.to_string(),
-    }
-}
-
-/// Lo que se pone en la columna del mes para un recibo que no es la cuota normal.
-fn etiqueta_otro(r: &Recibo) -> String {
-    if r.atrasos() && r.periodo.len() >= 7 {
-        format!("+ {}", mes_corto(&r.periodo))
-    } else {
-        let p: String = r.concepto.split_whitespace().next().unwrap_or("otro").to_lowercase().chars().take(8).collect();
-        format!("+ {p}")
-    }
-}
-
-fn cargo(r: &Recibo) -> String {
-    let c = r.fecha_cargo();
-    if fmt::fecha(c).is_some() { dm(c) } else { c.to_string() }
-}
-
-/// Las filas de la tabla de meses (sin la cabecera ni el total), a fecha de `hoy`.
-pub fn filas(c: &CuotasAnio, hoy: &str) -> Vec<Fila> {
-    let mut v = Vec::new();
-    for m in &c.meses {
-        let mes = fmt::MESES_C[m.mes as usize - 1].to_string();
-        if m.recibos.is_empty() {
-            let (t, st) = match &m.estado {
-                EstadoMes::SinRecibo => ("sin recibo".to_string(), Style::new().fg(tema::AVISO)),
-                EstadoMes::Pendiente => ("aún no".into(), tema::apagado()),
-                EstadoMes::OtroMes(cargo) => (format!("en {}", mes_corto(cargo.get(..7).unwrap_or(""))), tema::apagado()),
-                _ => ("—".into(), tema::apagado()),
-            };
-            v.push(Fila { celdas: [mes, t, String::new()], estilo: st, estilo_mes: Style::new(), recibo: None });
-            continue;
-        }
-        let mut puesto = false;
-        for r in &m.recibos {
-            let etiqueta = if r.es_cuota() && !puesto { mes.clone() } else if r.es_cuota() { String::new() } else { etiqueta_otro(r) };
-            puesto = true;
-            let celdas = [etiqueta, eur(r.importe), cargo(r)];
-            let estilo = if r.por_cargar(hoy) { tema::apagado() } else { Style::new() };
-            let estilo_mes = if r.es_cuota() { Style::new() } else { tema::apagado().add_modifier(Modifier::ITALIC) };
-            v.push(Fila { celdas, estilo, estilo_mes, recibo: Some(r.clone()) });
-        }
-    }
-    v
-}
-
-/// La fila del total del año.
-pub fn total(c: &CuotasAnio) -> [String; 3] {
-    ["Total".into(), eur(c.total), String::new()]
-}
-
-/// El desglose de un recibo: (concepto, importe), sin los que van a cero.
+/// El desglose de un recibo: (concepto, importe), sin los que van a cero. Los nombres, cortos y en minúscula: van en
+/// la ficha, con puntos guía.
 pub fn desglose(r: &Recibo) -> Vec<(&'static str, f64)> {
     let k = &r.conceptos;
-    [
-        ("Pensión y bajas (contingencias comunes)", k.cc),
-        ("Accidentes de trabajo", k.cp),
-        ("Cese de actividad (tu «paro»)", k.cese),
-        ("Formación profesional", k.fp),
-        ("Equidad intergeneracional (MEI)", k.mei),
-    ]
+    [("pensión/bajas", k.cc), ("accidentes", k.cp), ("cese (paro)", k.cese), ("formación", k.fp), ("MEI", k.mei)]
     .into_iter()
     .filter(|(_, x)| x.abs() > DIF)
     .collect()
 }
-
-/// ¿Hay algo que enseñar en la tabla? (recibos, o meses de alta sin recibo o por llegar)
-pub fn hay_tabla(c: &CuotasAnio) -> bool {
-    c.n_recibos > 0 || c.meses.iter().any(|m| matches!(m.estado, EstadoMes::SinRecibo | EstadoMes::Pendiente))
-}
-
 
 /// La base que se ve en los recibos, si la Seguridad Social no la da.
 fn base_de(c: &CuotasAnio) -> Option<f64> {
@@ -135,7 +55,7 @@ pub fn cifras(c: &CuotasAnio, ss: &Tgss, hoy: &str) -> Vec<Cifra> {
         format!("{} recibo{}", c.n_recibos, if c.n_recibos == 1 { "" } else { "s" })
     };
     let valor = if c.n_recibos == 0 { "—".into() } else { eur(c.total) };
-    v.push(Cifra { etiqueta: format!("Pagado en {y}"), corta: format!("Pagado {y}"), valor, nota, estilo: Style::new().fg(tema::ACENTO) });
+    v.push(Cifra { etiqueta: format!("pagado en {y}"), valor, nota, estilo: Style::new().fg(tema::acento()) });
 
     let cot = &ss.cotizacion;
     if actual && (cot.ultima_cuota.is_some() || c.ultima().is_some()) {
@@ -146,11 +66,11 @@ pub fn cifras(c: &CuotasAnio, ss: &Tgss, hoy: &str) -> Vec<Cifra> {
             _ => String::new(),
         };
         let de = if cot.ultima_cuota_mes.is_empty() { String::new() } else { format!(" de {}", cot.ultima_cuota_mes) };
-        v.push(Cifra { etiqueta: format!("Cuota{de}"), corta: "Cuota".into(), valor: eur(cuota), nota, estilo: normal });
+        v.push(Cifra { etiqueta: format!("cuota{de}"), valor: eur(cuota), nota, estilo: normal });
     } else {
         let nota = c.base_media().map(|b| format!("base ≈ {}", eur0(b))).unwrap_or_default();
         let valor = if c.meses_con_cuota == 0 { "—".into() } else { eur(c.media()) };
-        v.push(Cifra { etiqueta: "Cuota media".into(), corta: "Media".into(), valor, nota, estilo: normal });
+        v.push(Cifra { etiqueta: "cuota media".into(), valor, nota, estilo: normal });
     }
 
     let proxima = cot.base_proxima.filter(|_| actual && cot.base_proxima_desde.as_str() > hoy);
@@ -164,7 +84,7 @@ pub fn cifras(c: &CuotasAnio, ss: &Tgss, hoy: &str) -> Vec<Cifra> {
         if let Some(t) = tipo {
             nota.push_str(&format!(" · ≈ {}", eur0(bp * t)));
         }
-        v.push(Cifra { etiqueta: "Base próxima".into(), corta: "Base próx.".into(), valor: eur(bp), nota, estilo: Style::new().fg(tema::AVISO) });
+        v.push(Cifra { etiqueta: "base próxima".into(), valor: eur(bp), nota, estilo: Style::new().fg(tema::AVISO) });
     } else {
         let esperados = c.meses.iter().filter(|m| !matches!(m.estado, EstadoMes::Fuera)).count();
         let (nota, estilo) = if !c.sin_recibo.is_empty() {
@@ -175,7 +95,7 @@ pub fn cifras(c: &CuotasAnio, ss: &Tgss, hoy: &str) -> Vec<Cifra> {
             (String::new(), normal)
         };
         let valor = if esperados == 0 { "—".into() } else { format!("{} de {esperados}", c.meses_con_cuota) };
-        v.push(Cifra { etiqueta: "Meses con cuota".into(), corta: "Meses".into(), valor, nota, estilo });
+        v.push(Cifra { etiqueta: "meses con cuota".into(), valor, nota, estilo });
     }
 
     let (valor, nota, estilo) = match &c.regularizacion {
@@ -188,8 +108,7 @@ pub fn cifras(c: &CuotasAnio, ss: &Tgss, hoy: &str) -> Vec<Cifra> {
         None if y >= fmt::anio_de(hoy) - 2 && c.n_recibos > 0 => ("Aún no".to_string(), format!("con tu Renta de {y}"), tema::apagado()),
         None => ("—".to_string(), "no consta".to_string(), tema::apagado()),
     };
-    let etiqueta = format!("Regularización de {y}");
-    v.push(Cifra { etiqueta, corta: "Regulariz.".into(), valor, nota, estilo });
+    v.push(Cifra { etiqueta: format!("regularización de {y}"), valor, nota, estilo });
     v
 }
 
@@ -208,7 +127,7 @@ pub fn notas(c: &CuotasAnio, ss: &Tgss, _hoy: &str) -> Vec<Nota> {
         nota(format!("Falta por cargar {} (el {}).", eur(c.por_cargar), dm(&c.por_cargar_el)), gris);
     }
     if c.atrasos > DIF {
-        nota(format!("Con «+», atrasos de otros meses: {} en {y}.", eur(c.atrasos)), gris);
+        nota(format!("Incluye {} de atrasos de otros meses en {y}.", eur(c.atrasos)), gris);
     }
     let red = c.reduccion();
     if red > 0.5 {

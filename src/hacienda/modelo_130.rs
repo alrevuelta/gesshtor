@@ -8,7 +8,9 @@
 //! 3. **Cuándo se presenta**: con el 303, cada trimestre (`hacienda::plazos_trimestres`). Quien factura casi todo
 //!    con retención se libra (`exento`).
 //! 4. **Cómo se calcula** con tus facturas y gastos (`calcular`): con lo acumulado desde el 1 de enero, y los
-//!    trimestres se encadenan (casillas 05 y 15, con los 130 anteriores del año).
+//!    trimestres se encadenan (casillas 05 y 15, con los 130 anteriores del año que tocaba presentar). Según las
+//!    instrucciones oficiales del 130 (sede.agenciatributaria.gob.es → IRPF → Modelo 130 → Instrucciones), que se
+//!    citan en cada casilla.
 use super::irpf::irpf_acumulado;
 use super::formulario::{Diseno, Formulario, QueCasillas};
 use super::modelo::{Memo, Modelo, Periodicidad, Trimestral};
@@ -24,6 +26,8 @@ impl Formulario for M130 {
     const MODELO: Modelo = Modelo::M130;
     const PERIODICIDAD: Periodicidad = Periodicidad::Trimestral;
     const CASILLAS: QueCasillas = QueCasillas::Disenos(DISENOS);
+    /// El resultado.
+    const ANCLAS: &'static [u32] = &[RESULTADO];
 
     /// La 04 no: se puede pagar más del 20 %.
     fn reglas(c: &Casillas) -> Vec<(u32, f64)> {
@@ -60,7 +64,9 @@ const DISENOS: &[Diseno] = &[Diseno { id: "e19", desde: 201901, casillas: &[1, 2
 
 /* ================= 4. calcularlo con tus facturas y gastos ================= */
 
-/// Minoración de la casilla 13 según el rendimiento neto del año anterior.
+/// Minoración de la casilla 13 según el rendimiento neto del año anterior (art. 110.3.c RIRPF): 100 € hasta
+/// 9.000 €, 75 € hasta 10.000 €, 50 € hasta 11.000 € y 25 € hasta 12.000 €. Puede dejar la 14 en negativo, y ese
+/// negativo se resta en los trimestres siguientes (casilla 15).
 pub fn minoracion(rn: Option<f64>) -> f64 {
     match rn {
         None => 0.0,
@@ -72,7 +78,11 @@ pub fn minoracion(rn: Option<f64>) -> f64 {
     }
 }
 
-/// ¿El de difícil justificación se resta también en los 130? (por defecto no: solo en la Renta)
+/// ¿El de difícil justificación se resta también en los 130? Por defecto no: solo en la Renta (`fiscal.gdj130`).
+/// Ojo: las instrucciones de la casilla 02 dicen que en la estimación directa simplificada «se incluirán en esta
+/// casilla los importes de las amortizaciones, de las provisiones deducibles y de los gastos de difícil
+/// justificación» del 1 de enero al fin del trimestre (art. 30 RIRPF). Sin restarlo se paga algo más a cuenta, que
+/// se recupera en la Renta.
 pub fn con_gdj(d: &Datos) -> bool {
     d.fiscal.gdj && d.fiscal.gdj130
 }
@@ -84,11 +94,15 @@ pub fn calcular(d: &Datos, anio: i32, q: u32, memo: &mut Memo) -> Casillas {
     let c1 = a.ingresos;
     let c2 = if con_gdj(d) { a.gastos } else { r2(a.gastos - a.gdj) };
     let c3 = r2(c1 - c2);
+    // 04: «el 20 por 100 del importe de la casilla 03»; si es negativa, cero.
     let c4 = if c3 > 0.0 { r2(c3 * 0.20) } else { 0.0 };
-    // 05: positivos de la casilla 07 de trimestres anteriores (menos sus casillas 16).
-    // 15: negativos de la casilla 19 anteriores aún no deducidos.
+    // 05: «la suma de las cantidades positivas consignadas en la casilla 07» de los 130 anteriores del año,
+    // «minorada en el importe de la suma de las cantidades consignadas en la casilla 16».
+    // 15: los negativos de la casilla 19 de los 130 anteriores del año «que no hubieran sido deducidos», como mucho
+    // lo positivo de la 14. Solo cuentan los 130 que tocaba presentar (`obligado`): uno calculado de antes del alta
+    // no se presentó y no deja nada.
     let (mut c5, mut pendiente) = (0.0, 0.0);
-    for k in 1..q {
+    for k in (1..q).filter(|&k| obligado(d, anio, k)) {
         let p = Trimestral::M130.cuenta(d, anio, k, memo);
         if p.v(7) > 0.0 {
             c5 = r2(c5 + p.v(7) - p.v(16));
@@ -98,9 +112,11 @@ pub fn calcular(d: &Datos, anio: i32, q: u32, memo: &mut Memo) -> Casillas {
         }
         pendiente = r2(pendiente - p.v(15));
     }
+    // 06: las retenciones de tus facturas, también desde el 1 de enero.
     let c6 = a.retenciones;
     let c7 = r2(c4 - c5 - c6);
     let (c8, c9, c10, c11) = (0.0, 0.0, 0.0, 0.0);
+    // 12: 07 + 11; «de obtenerse una cantidad negativa, consigne el número cero».
     let c12 = r2(c7 + c11).max(0.0);
     let c13 = minoracion(rn_anterior(d, anio).valor);
     let c14 = r2(c12 - c13);
@@ -123,6 +139,8 @@ pub struct RnAnterior {
 pub enum OrigenRn {
     /// Lo has escrito a mano.
     Escrito,
+    /// De tu Renta del año anterior (casilla 0224).
+    Renta,
     /// Empezaste la actividad ese año: el anterior cuenta como 0.
     Alta,
     /// Calculado con tus datos del año anterior.
@@ -132,17 +150,31 @@ pub enum OrigenRn {
     NoSe,
 }
 
+/// ¿Tocaba presentar el 130 de ese trimestre? Sí si consta presentado; si no, no antes del alta ni después de la
+/// baja (las fechas de tu perfil, `Datos::fechas_actividad`) ni si te libras (`se_libra`).
+pub fn obligado(d: &Datos, anio: i32, q: u32) -> bool {
+    if super::consta(d, anio, q, Modelo::M130) {
+        return true;
+    }
+    super::modelo_303::en_actividad(d, anio, q) && !se_libra(d, anio, q)
+}
+
 /// ¿Empezó la actividad ese año (o después)? Con la fecha de tu perfil (`Datos::fechas_actividad`).
 fn primer_anio_de_actividad(d: &Datos, anio: i32) -> bool {
     let (alta, _) = d.fechas_actividad();
     !alta.is_empty() && anio_de(alta) >= anio
 }
 
-/// El rendimiento neto del año anterior: 1º lo escrito a mano; 2º si empezaste este año, 0; 3º lo que salga con tus
-/// datos del año pasado.
+/// El rendimiento neto del año anterior, el de la casilla 13: «los rendimientos netos [...] de la declaración de IRPF
+/// del ejercicio anterior (casillas 0224, 1479, 1553 y/o 1577)», y «si en el ejercicio anterior no se hubiese
+/// ejercido actividad económica alguna, [...] cero». Por orden: 1º lo escrito a mano; 2º tu Renta del año anterior,
+/// si tiene actividad; 3º si empezaste este año, 0; 4º lo que salga con tus datos del año pasado.
 pub fn rn_anterior(d: &Datos, anio: i32) -> RnAnterior {
     if let Some(&valor) = d.fiscal.rn_anterior.get(&anio) {
         return RnAnterior { valor: Some(valor), origen: OrigenRn::Escrito };
+    }
+    if let Some(a) = d.lecturas.rentas.get(&(anio - 1)).and_then(|r| r.actividad.as_ref()) {
+        return RnAnterior { valor: Some(a.neto), origen: OrigenRn::Renta };
     }
     if primer_anio_de_actividad(d, anio) {
         return RnAnterior { valor: Some(0.0), origen: OrigenRn::Alta };
@@ -237,6 +269,41 @@ mod tests {
         assert!(descuadres::<M130>(&c(&[(1, 100.0), (2, 40.0), (3, 60.0), (4, 30.0), (7, 30.0), (12, 30.0), (14, 30.0), (17, 30.0), (19, 30.0)])).is_empty());
         assert_eq!(M130::sin_resultado(&c(&[(19, -5.0)])), Tipo::Negativa);
         assert_eq!(M130::sin_resultado(&c(&[])), Tipo::Cero);
+    }
+
+    use crate::dominio::renta::{Actividad, Renta};
+    use crate::dominio::{Factura, Linea, Num};
+
+    /// Una factura sin IVA ni retención de 10.000 € en agosto de 2026.
+    fn con_alta_en_agosto() -> Datos {
+        let mut d = Datos::default();
+        d.perfil.fecha_alta = "2026-08-01".into();
+        let lineas = vec![Linea { concepto: "Servicio".into(), cantidad: Num::de(1.0), precio: Num::de(10000.0), iva: Num::de(0.0) }];
+        d.facturas.push(Factura { estado: "emitida".into(), fecha: "2026-08-20".into(), operacion: "extra".into(), lineas, ..Default::default() });
+        d
+    }
+
+    /// Los trimestres de antes del alta no se presentan: no dejan negativos (la minoración) para el 3T.
+    #[test]
+    fn antes_del_alta_no_cuenta() {
+        let d = con_alta_en_agosto();
+        assert!(!obligado(&d, 2026, 2) && obligado(&d, 2026, 3));
+        let c = calcular(&d, 2026, 3, &mut Memo::default());
+        // Primer año: el anterior cuenta como 0 → 100 € de minoración; nada de 05 ni 15.
+        assert_eq!((c.v(4), c.v(5), c.v(13), c.v(15), c.v(19)), (2000.0, 0.0, 100.0, 0.0, 1900.0));
+    }
+
+    /// La casilla 13 sale de la Renta del año anterior (0224) antes que de la fecha de alta.
+    #[test]
+    fn minoracion_con_la_renta_anterior() {
+        let mut d = con_alta_en_agosto();
+        let renta = |neto| Renta { actividad: Some(Actividad { neto, ..Default::default() }), ..Default::default() };
+        d.lecturas.rentas.insert(2025, renta(15000.0));
+        let rn = rn_anterior(&d, 2026);
+        assert_eq!((rn.valor, rn.origen), (Some(15000.0), OrigenRn::Renta));
+        assert_eq!(calcular(&d, 2026, 3, &mut Memo::default()).v(13), 0.0);
+        d.lecturas.rentas.insert(2025, renta(9500.0));
+        assert_eq!(calcular(&d, 2026, 3, &mut Memo::default()).v(13), 75.0);
     }
 
     #[test]

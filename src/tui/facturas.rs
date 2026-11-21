@@ -1,12 +1,12 @@
 //! Facturas: las del año y todos los borradores, el detalle, el editor de borradores,
-//! emitir, cobrar y duplicar.
+//! emitir, cobrar y duplicar; y tus clientes (`C`, con el de la factura elegida).
 
-use super::clientes::{limpia_nif, opciones_operacion, validar_nif};
+use super::clientes::{self, limpia_nif, opciones_operacion, validar_nif, Clientes};
 use crate::dominio::factura::{self, mencion_iva, serie_factura, siguiente_numero, totales_factura};
 use crate::dominio::fmt::{self, dmy, eur, fecha_corta, pct};
 use crate::dominio::{uid, Cliente, Datos, Factura, Linea, Num};
 use crate::informe::autonomo;
-use crate::tui::widgets::{bloque, coincide, derecha, kpi, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
+use crate::tui::widgets::{coincide, derecha, guia, linea_atajos, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
 use crate::tui::texto::lineas;
 use crate::tui::{Ctx, Pantalla};
 use editor::{Editor, Salida};
@@ -18,7 +18,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 use super::facturas_editor as editor;
 
-/* ================= reglas (las de la web) ================= */
+/* ================= reglas ================= */
 
 const PAISES_UE: [&str; 28] = ["AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "GR", "ES", "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK"];
 
@@ -168,7 +168,7 @@ fn poner(d: &mut Datos, f: Factura) {
     }
 }
 
-/// Al emitir, el cliente queda guardado en Clientes.
+/// Al emitir, el cliente queda guardado en tus clientes (si ya estaba, con sus datos de esta factura).
 fn guardar_cliente(d: &mut Datos, f: &Factura) {
     let c = &f.cliente;
     if c.nombre.is_empty() {
@@ -249,17 +249,25 @@ fn kv(etq: &str, val: &str, ancho: u16, estilo: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Estado para la lista: Borrador, Pendiente, Vencida, Cobrada dd/mm.
+/// Estado para la lista y el detalle: Borrador, Pendiente, Vencida, Cobrada 14 oct.
 fn estado(f: &Factura, hoy: &str) -> (String, Style) {
     if f.borrador() {
         ("Borrador".into(), tema::apagado())
     } else if let Some(c) = f.cobrada.as_deref().filter(|c| !c.is_empty()) {
-        let dm = fmt::fecha(c).map(|d| d.format("%d/%m").to_string()).unwrap_or_default();
-        (format!("Cobrada {dm}"), Style::new().fg(tema::BIEN))
+        (format!("Cobrada {}", fecha_lista(c, fmt::anio_de(hoy))), Style::new().fg(tema::BIEN))
     } else if !f.vencimiento.is_empty() && f.vencimiento.as_str() < hoy {
         ("Vencida".into(), Style::new().fg(tema::MAL).add_modifier(Modifier::BOLD))
     } else {
         ("Pendiente".into(), Style::new().fg(tema::AVISO))
+    }
+}
+
+/// «2026-10-14» → «14 oct»; con el año si no es `anio` («1 abr 2023»).
+fn fecha_lista(s: &str, anio: i32) -> String {
+    let c = fecha_corta(s);
+    match c.rsplit_once(' ') {
+        Some((dm, _)) if fmt::anio_de(s) == anio => dm.to_string(),
+        _ => c,
     }
 }
 
@@ -268,9 +276,9 @@ fn plural(n: usize) -> String {
 }
 
 /// Todo lo de una factura, para la vista completa; `corto` (el panel de la derecha) deja fuera la dirección
-/// del cliente.
+/// del cliente. Estilo C2: el número y el estado arriba; las etiquetas en gris; y los totales con puntos guía,
+/// acabando en `ancho`.
 fn texto_detalle(f: &Factura, ancho: u16, corto: bool, cerrado: bool) -> Vec<Line<'static>> {
-    let t = totales_factura(f);
     let hoy = fmt::hoy();
     let negrita = Style::new().add_modifier(Modifier::BOLD);
     let nacional = f.operacion == "nacional";
@@ -279,16 +287,16 @@ fn texto_detalle(f: &Factura, ancho: u16, corto: bool, cerrado: bool) -> Vec<Lin
     let (est, st) = estado(f, &hoy);
     let titulo = if f.numero.is_empty() { "Borrador".to_string() } else { format!("Factura {}", f.numero) };
     let est = if f.emitida() && !f.cobrada() { format!("Emitida · {}", est.to_lowercase()) } else { est };
-    v.push(Line::from(vec![Span::styled(titulo, tema::titulo()), Span::raw("  "), Span::styled(est, st)]));
+    v.push(Line::from(vec![Span::styled(titulo, tema::titulo()), Span::raw("   "), Span::styled(est, st)]));
     if let Some(r) = &f.rectifica {
         v.push(Line::styled(format!("Rectifica la factura {}", if r.numero.is_empty() { "?" } else { &r.numero }), tema::apagado()));
     }
     v.push(Line::from(""));
     let normal = Style::new();
     if c.nombre.trim().is_empty() {
-        v.extend(kv("Cliente", "Consumidor final (factura simplificada)", ancho, normal));
+        v.extend(kv("cliente", "Consumidor final (factura simplificada)", ancho, normal));
     } else {
-        v.extend(kv("Cliente", &c.nombre, ancho, negrita));
+        v.extend(kv("cliente", &c.nombre, ancho, negrita));
         if !c.nif.is_empty() {
             v.extend(kv("", &format!("{} {}", if f.operacion == "ue" { "VAT" } else { "NIF" }, c.nif), ancho, normal));
         }
@@ -301,15 +309,15 @@ fn texto_detalle(f: &Factura, ancho: u16, corto: bool, cerrado: bool) -> Vec<Lin
         }
     }
     v.push(Line::from(""));
-    v.extend(kv("Fecha", &fecha_corta(&f.fecha), ancho, normal));
+    v.extend(kv("fecha", &fecha_corta(&f.fecha), ancho, normal));
     if !f.fecha_operacion.is_empty() && f.fecha_operacion != f.fecha {
-        v.extend(kv("F. operación", &fecha_corta(&f.fecha_operacion), ancho, normal));
+        v.extend(kv("f. operación", &fecha_corta(&f.fecha_operacion), ancho, normal));
     }
     if !f.vencimiento.is_empty() {
-        v.extend(kv("Vence", &fecha_corta(&f.vencimiento), ancho, normal));
+        v.extend(kv("vence", &fecha_corta(&f.vencimiento), ancho, normal));
     }
     let op = opciones_operacion().into_iter().find(|o| o.0 == f.operacion).map(|o| o.1).unwrap_or("");
-    v.extend(kv("Operación", op, ancho, normal));
+    v.extend(kv("operación", op, ancho, normal));
     v.push(Line::from(""));
     if f.lineas.is_empty() {
         v.push(Line::styled("Sin líneas", tema::apagado()));
@@ -322,44 +330,54 @@ fn texto_detalle(f: &Factura, ancho: u16, corto: bool, cerrado: bool) -> Vec<Lin
         v.push(fila(izq, eur(fmt::r2(l.cantidad.v() * l.precio.v())), ancho, tema::apagado(), normal));
     }
     v.push(Line::from(""));
-    v.push(fila("Base imponible", eur(t.base), ancho, normal, normal));
-    if nacional {
-        for g in &t.desglose {
-            let sobre = if t.desglose.len() > 1 { format!(" s/ {}", eur(g.base)) } else { String::new() };
-            v.push(fila(format!("IVA {}{sobre}", pct(g.tipo)), eur(g.cuota), ancho, normal, normal));
-        }
-    } else {
-        v.push(fila("IVA", eur(0.0), ancho, normal, normal));
-    }
-    if t.retencion != 0.0 {
-        v.push(fila("Importe total", eur(t.importe_total), ancho, tema::apagado(), tema::apagado()));
-        v.push(fila(format!("Retención IRPF {}", pct(f.retencion.v())), format!("−{}", eur(t.retencion)), ancho, normal, normal));
-    }
-    v.push(fila("Total a cobrar", eur(t.total), ancho, negrita, negrita));
+    v.extend(totales(f, ancho));
     if let Some(m) = mencion_iva(f) {
         v.push(Line::from(""));
-        let cursiva = tema::apagado().add_modifier(Modifier::ITALIC);
-        v.extend(lineas(&m, ancho as usize).into_iter().map(|t| Line::styled(t, cursiva)));
+        v.extend(lineas(&m, ancho as usize).into_iter().map(|t| Line::styled(t, tema::apagado())));
     }
     v.push(Line::from(""));
     if !f.forma_pago.is_empty() {
-        v.extend(kv("Forma de pago", &f.forma_pago, ancho, normal));
+        v.extend(kv("forma de pago", &f.forma_pago, ancho, normal));
     }
     if !f.notas.is_empty() {
-        v.extend(kv("Notas", &f.notas, ancho, normal));
+        v.extend(kv("notas", &f.notas, ancho, normal));
     }
     if let Some(cb) = f.cobrada.as_deref().filter(|s| !s.is_empty()) {
-        v.extend(kv("Cobrada", &fecha_corta(cb), ancho, Style::new().fg(tema::BIEN)));
+        v.extend(kv("cobrada", &fecha_corta(cb), ancho, Style::new().fg(tema::BIEN)));
     } else if f.emitida() {
         let t = if cerrado { "todavía no" } else { "todavía no (c para marcarla)" };
-        v.extend(kv("Cobrada", t, ancho, Style::new().fg(tema::AVISO)));
+        v.extend(kv("cobrada", t, ancho, Style::new().fg(tema::AVISO)));
     }
     if !f.doc.is_empty() {
-        v.extend(kv("Documento", &format!("{} (o abrir)", f.doc), ancho, normal));
+        v.extend(kv("documento", &format!("{} (o abrir)", f.doc), ancho, normal));
     }
     if f.borrador() {
         v.push(Line::styled("Borrador: Enter para editarlo, E para emitirlo.", tema::apagado()));
     }
+    v
+}
+
+/// Los totales de una factura con puntos guía, con las cifras acabando en `ancho`: la base, el IVA (por tipos), la
+/// retención y el total a cobrar, en negrita. Los usan el detalle y el editor.
+pub(super) fn totales(f: &Factura, ancho: u16) -> Vec<Line<'static>> {
+    let t = totales_factura(f);
+    let normal = Style::new();
+    let negrita = normal.add_modifier(Modifier::BOLD);
+    let linea = |etq: String, cifra: String, st: Style| guia(Span::styled(etq, st), cifra, st, ancho);
+    let mut v = vec![linea("base imponible".into(), eur(t.base), normal)];
+    if f.operacion == "nacional" {
+        for g in &t.desglose {
+            let sobre = if t.desglose.len() > 1 { format!(" s/ {}", eur(g.base)) } else { String::new() };
+            v.push(linea(format!("IVA {}{sobre}", pct(g.tipo)), eur(g.cuota), normal));
+        }
+    } else {
+        v.push(linea("IVA".into(), eur(0.0), normal));
+    }
+    if t.retencion != 0.0 {
+        v.push(linea("importe total".into(), eur(t.importe_total), tema::apagado()));
+        v.push(linea(format!("retención IRPF {}", pct(f.retencion.v())), format!("−{}", eur(t.retencion)), normal));
+    }
+    v.push(linea("total a cobrar".into(), eur(t.total), negrita));
     v
 }
 
@@ -405,8 +423,8 @@ enum Accion {
     Descartar,
 }
 
-/// Columnas de la lista (se quitan las menos importantes si no caben).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Columnas de la lista, en su orden (se quitan las menos importantes si no caben).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Col {
     Numero,
     Fecha,
@@ -435,6 +453,8 @@ pub struct Facturas {
     /// Fecha de cobro que se está pidiendo (id de la factura).
     cobro: Option<(Formulario, String)>,
     confirmar: Option<(Confirmar, Accion)>,
+    /// La lista de tus clientes, abierta encima.
+    clientes: Option<Clientes>,
     /// Filas que caben en la tabla (para PgUp / PgDn).
     alto: usize,
     /// La elegida es un borrador (Some(true)), una emitida (Some(false)) o no hay (None): para los atajos.
@@ -478,6 +498,17 @@ impl Facturas {
     fn mover(&mut self, d: isize, n: usize) {
         self.sel = if n == 0 { 0 } else { (self.sel as isize + d).clamp(0, n as isize - 1) as usize };
         self.scroll = 0;
+    }
+
+    /// Abre tus clientes, con el de la factura elegida (si está guardado; si no, se dice).
+    fn abrir_clientes(&mut self, ctx: &mut Ctx) {
+        let f = self.elegida(ctx).map(|i| &ctx.datos.facturas[i]);
+        let c = Clientes::de(&ctx.datos, f);
+        if let Some(f) = f.filter(|f| !f.cliente.nombre.trim().is_empty() && !ctx.datos.clientes.iter().any(|c| clientes::es_del_cliente(f, c))) {
+            let nombre = f.cliente.nombre.clone();
+            ctx.info(format!("«{nombre}» no está en tus clientes: se guarda al emitir la factura (o con n)."));
+        }
+        self.clientes = Some(c);
     }
 
     fn editar(&mut self, ctx: &mut Ctx) {
@@ -612,9 +643,41 @@ impl Facturas {
         }
     }
 
-    fn dibujar_kpis(&self, f: &mut Frame, area: Rect, ctx: &Ctx) {
+    /// Arriba de la lista: los filtros (con su tecla delante y el elegido en FONDO sobre el color de la sección), el
+    /// año y cuántas se ven y, a la derecha si caben, las teclas de buscar y de los clientes (abajo no caben todas);
+    /// en la fila de debajo, si se busca, la búsqueda.
+    fn dibujar_filtros(&self, f: &mut Frame, area: Rect, ctx: &Ctx, n: usize) {
+        let gris = tema::apagado();
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
+        // La «f» delante: es la que pasa de un filtro a otro.
+        let mut v = vec![Span::styled("f ", negrita)];
+        for (i, x) in [Filtro::Todas, Filtro::Pendientes, Filtro::Borradores].into_iter().enumerate() {
+            if i > 0 {
+                v.push(Span::raw("  "));
+            }
+            // Todas con su hueco a cada lado: al cambiar de filtro no se mueve nada.
+            v.push(Span::styled(format!(" {} ", x.nombre()), if x == self.filtro { tema::pestana_activa() } else { gris }));
+        }
+        v.extend([Span::raw("     "), Span::styled(ctx.anio.to_string(), negrita), Span::styled(format!(" · {}", plural(n)), gris)]);
+        let usado = Line::from(v.clone()).width();
+        let fila = Rect { height: area.height.min(1), ..area };
+        f.render_widget(Paragraph::new(Line::from(v)), fila);
+        let teclas = linea_atajos(&[("/", "buscar"), ("C", "clientes")]);
+        if !self.buscando && usado + 5 + teclas.width() <= area.width as usize {
+            f.render_widget(Paragraph::new(teclas.right_aligned()), fila);
+        }
+        if (self.buscando || !self.busca.valor.is_empty()) && area.height >= 2 {
+            let fila = Rect { y: area.y + 1, height: 1, ..area };
+            let [e, t] = Layout::horizontal([Constraint::Length(7), Constraint::Min(1)]).areas(fila);
+            f.render_widget(Paragraph::new(Span::styled("buscar", gris)), e);
+            self.busca.dibujar(f, t, self.buscando, negrita);
+        }
+    }
+
+    /// Lo facturado en el año (por la fecha que cuenta para los impuestos, como el 303 y el 130), con puntos guía:
+    /// la base, el IVA, las retenciones y lo pendiente de cobro (en AVISO si hay), cada cifra con su nota en gris.
+    fn dibujar_resumen(&self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         let (mut base, mut cuota, mut ret, mut pend, mut n, mut np) = (0.0, 0.0, 0.0, 0.0, 0, 0);
-        // Por la fecha que cuenta para los impuestos (la de la operación, si la hay), como el 303 y el 130.
         for x in factura::emitidas(&ctx.datos).filter(|x| fmt::anio_de(x.devengo()) == ctx.anio) {
             let t = totales_factura(x);
             base += t.base;
@@ -626,125 +689,119 @@ impl Facturas {
                 np += 1;
             }
         }
-        let [a, b, c, d] = Layout::horizontal([Constraint::Ratio(1, 4); 4]).areas(area);
-        kpi(f, a, &format!("Facturado en {}", ctx.anio), &eur(base), &format!("{} (base)", plural(n)), Style::new());
-        kpi(f, b, "IVA repercutido", &eur(cuota), "va al modelo 303", Style::new());
-        kpi(f, c, "Retenciones", &eur(ret), "a cuenta del IRPF", Style::new());
-        kpi(f, d, "Pendiente de cobro", &eur(pend), &plural(np), if pend > 0.005 { Style::new().fg(tema::AVISO) } else { Style::new() });
+        let st_pend = if pend > 0.005 { Style::new().fg(tema::AVISO) } else { Style::new() };
+        let filas = [
+            (format!("facturado en {}", ctx.anio), eur(base), Style::new(), format!("base de {}", plural(n))),
+            ("IVA repercutido".to_string(), eur(cuota), Style::new(), "va al modelo 303".to_string()),
+            ("retenciones".to_string(), eur(ret), Style::new(), "a cuenta del IRPF".to_string()),
+            ("pendiente de cobro".to_string(), eur(pend), st_pend, format!("de {}", plural(np))),
+        ];
+        // Todas las cifras acaban en la misma columna, con al menos unos puntos.
+        let fin = filas.iter().map(|(e, c, ..)| e.chars().count() + c.chars().count() + 6).max().unwrap_or(0) as u16;
+        let v: Vec<Line> = filas
+            .into_iter()
+            .map(|(e, c, st, nota)| {
+                let mut l = guia(e, c, st, fin);
+                l.push_span(Span::styled(format!("   {nota}"), tema::apagado()));
+                l
+            })
+            .collect();
+        f.render_widget(Paragraph::new(v), area);
     }
 
+    /// La lista, sin caja: la cabecera de las columnas en gris, las cifras a la derecha (sin «€»: ya lo dice el
+    /// resumen) y la elegida en el fondo suave de la sección. Si no caben todas las columnas, se quitan las menos
+    /// importantes.
     fn dibujar_lista(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx, lista: &[usize]) {
         let d = &ctx.datos;
-        let b = bloque("Facturas");
-        let b = b.title(Span::styled(format!(" {} · {} ", ctx.anio, plural(lista.len())), tema::apagado()));
-        let dentro = b.inner(area);
-        f.render_widget(b, area);
-        let [barra, cuerpo] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(dentro);
-        // Filtros y búsqueda
-        let mut spans = vec![Span::raw(" ")];
-        for x in [Filtro::Todas, Filtro::Pendientes, Filtro::Borradores] {
-            spans.push(Span::styled(format!(" {} ", x.nombre()), if x == self.filtro { tema::pestana_activa() } else { tema::apagado() }));
-            spans.push(Span::raw(" "));
-        }
-        let w_filtros = spans.iter().map(|s| s.width()).sum::<usize>() as u16;
-        let [a_fil, a_bus] = Layout::horizontal([Constraint::Length(w_filtros), Constraint::Min(0)]).areas(barra);
-        f.render_widget(Paragraph::new(Line::from(spans)), a_fil);
-        if self.buscando || !self.busca.valor.is_empty() {
-            let [e, t] = Layout::horizontal([Constraint::Length(9), Constraint::Min(1)]).areas(a_bus);
-            f.render_widget(Paragraph::new(Span::styled(" Buscar: ", tema::apagado())), e);
-            self.busca.dibujar(f, t, self.buscando, Style::new().add_modifier(Modifier::BOLD));
-        } else {
-            f.render_widget(Paragraph::new(Span::styled(" f filtro · / buscar", tema::apagado())), a_bus);
-        }
         if lista.is_empty() {
             let txt = if self.filtro == Filtro::Todas && self.busca.valor.is_empty() {
                 if self.cerrado {
-                    format!(" No hay facturas de {} en la app. Es un año cerrado: se ve en Impuestos, con tu Renta.", ctx.anio)
+                    format!("No hay facturas de {} en la app. Es un año cerrado: se ve en Impuestos, con tu Renta.", ctx.anio)
                 } else {
-                    format!(" Todavía no hay facturas en {}. Pulsa n para crear la primera.", ctx.anio)
+                    format!("Todavía no hay facturas en {}. Pulsa n para crear la primera.", ctx.anio)
                 }
             } else {
-                " No hay facturas en esta vista.".to_string()
+                "No hay facturas en esta vista.".to_string()
             };
-            f.render_widget(Paragraph::new(Line::styled(txt, tema::apagado())).wrap(Wrap { trim: false }), cuerpo);
+            f.render_widget(Paragraph::new(Line::styled(txt, tema::apagado())).wrap(Wrap { trim: false }), area);
             return;
         }
-        let w = cuerpo.width;
-        let w_num = lista.iter().map(|&i| d.facturas[i].numero.chars().count()).max().unwrap_or(0).clamp(8, 14) as u16;
-        let mut cols = vec![Col::Numero];
-        if w >= 62 {
-            cols.push(Col::Fecha);
+        let hoy = fmt::hoy();
+        let facturas: Vec<&Factura> = lista.iter().map(|&i| &d.facturas[i]).collect();
+        let tot: Vec<_> = facturas.iter().map(|x| totales_factura(x)).collect();
+        let estados: Vec<(String, Style)> = facturas.iter().map(|x| estado(x, &hoy)).map(|(e, st)| (e.to_lowercase(), st)).collect();
+        // El ancho de cada columna: lo más largo de ella, o su título.
+        fn largo(v: impl Iterator<Item = String>, titulo: &str) -> u16 {
+            v.map(|s| s.chars().count()).max().unwrap_or(0).max(titulo.chars().count()) as u16
         }
-        cols.push(Col::Cliente);
-        // Lo que cabe, dejando al cliente al menos unos 13 caracteres.
-        if w >= 72 {
-            cols.push(Col::Base);
-        }
-        if w >= 85 {
-            cols.push(Col::Iva);
-        }
-        if w >= 97 {
-            cols.push(Col::Retencion);
-        }
-        cols.extend([Col::Total, Col::Estado, Col::Doc]);
         let ancho = |c: Col| match c {
-            Col::Numero => Constraint::Length(w_num),
-            Col::Fecha => Constraint::Length(11),
-            Col::Cliente => Constraint::Fill(1),
-            Col::Base | Col::Total => Constraint::Length(12),
-            Col::Iva | Col::Retencion => Constraint::Length(11),
-            Col::Estado => Constraint::Length(13),
-            Col::Doc => Constraint::Length(1),
+            Col::Numero => largo(facturas.iter().map(|x| x.numero.clone()), "borrador").min(14),
+            Col::Fecha => largo(facturas.iter().map(|x| fecha_lista(&x.fecha, ctx.anio)), "fecha"),
+            Col::Cliente => 16,
+            Col::Base => largo(tot.iter().map(|t| fmt::num(t.base)), "base"),
+            Col::Iva => largo(tot.iter().map(|t| fmt::num(t.cuota)), "IVA"),
+            Col::Retencion => largo(tot.iter().map(|t| fmt::num(t.retencion)), "retención"),
+            Col::Total => largo(tot.iter().map(|t| fmt::num(t.total)), "total"),
+            Col::Estado => largo(estados.iter().map(|e| e.0.clone()), "estado"),
+            Col::Doc => 1,
         };
+        // Las que siempre van y, mientras quepan (con el cliente a 16 como poco), las demás por orden de importancia.
+        const ESPACIO: u16 = 2;
+        let mut cols = vec![Col::Numero, Col::Cliente, Col::Total, Col::Estado];
+        if facturas.iter().any(|x| !x.doc.is_empty()) {
+            cols.push(Col::Doc);
+        }
+        for c in [Col::Fecha, Col::Base, Col::Iva, Col::Retencion] {
+            let ocupa: u16 = cols.iter().chain([&c]).map(|&c| ancho(c) + ESPACIO).sum();
+            if ocupa <= area.width {
+                cols.push(c);
+            }
+        }
+        cols.sort();
         let titulo = |c: Col| match c {
-            Col::Numero => Cell::from("Número"),
-            Col::Fecha => Cell::from("Fecha"),
-            Col::Cliente => Cell::from("Cliente"),
-            Col::Base => Cell::from(derecha("Base")),
+            Col::Numero => Cell::from("número"),
+            Col::Fecha => Cell::from("fecha"),
+            Col::Cliente => Cell::from("cliente"),
+            Col::Base => Cell::from(derecha("base")),
             Col::Iva => Cell::from(derecha("IVA")),
-            Col::Retencion => Cell::from(derecha("Retención")),
-            Col::Total => Cell::from(derecha("Total")),
-            Col::Estado => Cell::from("Estado"),
+            Col::Retencion => Cell::from(derecha("retención")),
+            Col::Total => Cell::from(derecha("total")),
+            Col::Estado => Cell::from("estado"),
             Col::Doc => Cell::from(""),
         };
-        let hoy = fmt::hoy();
-        let filas: Vec<Row> = lista
+        let filas: Vec<Row> = facturas
             .iter()
-            .map(|&i| {
-                let x = &d.facturas[i];
-                let t = totales_factura(x);
+            .zip(&tot)
+            .zip(&estados)
+            .map(|((x, t), (e, st))| {
                 Row::new(cols.iter().map(|&c| match c {
-                    Col::Numero if x.numero.is_empty() => Cell::from(Span::styled("borrador", tema::apagado().add_modifier(Modifier::ITALIC))),
+                    Col::Numero if x.numero.is_empty() => Cell::from(Span::styled("borrador", tema::apagado())),
                     Col::Numero => Cell::from(x.numero.clone()),
-                    Col::Fecha => Cell::from(fecha_corta(&x.fecha)),
+                    Col::Fecha => Cell::from(Span::styled(fecha_lista(&x.fecha, ctx.anio), tema::apagado())),
                     Col::Cliente if x.cliente.nombre.trim().is_empty() => Cell::from(Span::styled("Consumidor final", tema::apagado())),
                     Col::Cliente => Cell::from(x.cliente.nombre.clone()),
-                    Col::Base => Cell::from(derecha(eur(t.base))),
-                    Col::Iva => Cell::from(derecha(eur(t.cuota))),
-                    Col::Retencion => Cell::from(derecha(eur(t.retencion))),
-                    Col::Total => Cell::from(derecha(eur(t.total))),
-                    Col::Estado => {
-                        let (e, st) = estado(x, &hoy);
-                        Cell::from(Span::styled(e, st))
-                    }
-                    Col::Doc => Cell::from(if x.doc.is_empty() { "" } else { "▤" }),
+                    Col::Base => Cell::from(derecha(fmt::num(t.base))),
+                    Col::Iva => Cell::from(derecha(fmt::num(t.cuota))),
+                    Col::Retencion => Cell::from(derecha(fmt::num(t.retencion))),
+                    Col::Total => Cell::from(derecha(fmt::num(t.total))),
+                    Col::Estado => Cell::from(Span::styled(e.clone(), *st)),
+                    Col::Doc => Cell::from(Span::styled(if x.doc.is_empty() { "" } else { "▤" }, tema::apagado())),
                 }))
             })
             .collect();
-        let tabla = Table::new(filas, cols.iter().map(|&c| ancho(c)))
-            .header(Row::new(cols.iter().map(|&c| titulo(c))).style(tema::cabecera_tabla()))
-            .column_spacing(1)
-            .row_highlight_style(tema::seleccion());
+        let anchos = cols.iter().map(|&c| if c == Col::Cliente { Constraint::Fill(1) } else { Constraint::Length(ancho(c)) });
+        let tabla = Table::new(filas, anchos).header(Row::new(cols.iter().map(|&c| titulo(c))).style(tema::cabecera_tabla())).column_spacing(ESPACIO).row_highlight_style(tema::seleccion());
         self.tabla.select(Some(self.sel));
-        self.alto = cuerpo.height.saturating_sub(1).max(1) as usize;
-        f.render_stateful_widget(tabla, cuerpo, &mut self.tabla);
+        self.alto = area.height.saturating_sub(1).max(1) as usize;
+        f.render_stateful_widget(tabla, area, &mut self.tabla);
     }
 
-    fn dibujar_detalle(&mut self, f: &mut Frame, area: Rect, x: &Factura, titulo: &str, corto: bool) {
-        let b = bloque(titulo);
-        let dentro = b.inner(area);
-        f.render_widget(b, area);
-        let dentro = dentro.inner(ratatui::layout::Margin::new(1, 0));
+    /// El detalle de una factura, sin caja: a pantalla completa (Enter) o en el panel de la derecha (`corto`). Se
+    /// desplaza con ↑ ↓.
+    fn dibujar_detalle(&mut self, f: &mut Frame, area: Rect, x: &Factura, corto: bool) {
+        // A pantalla completa, no más ancho de lo que se lee bien.
+        let dentro = Rect { width: area.width.min(60), ..area };
         let t = texto_detalle(x, dentro.width, corto, self.cerrado);
         // Filas que ocupa con las líneas largas partidas (aproximado: basta para no bajar de más).
         let w = dentro.width.max(1) as usize;
@@ -768,11 +825,19 @@ impl Pantalla for Facturas {
     }
 
     fn capturando(&self) -> bool {
-        self.editor.is_some() || self.confirmar.is_some() || self.cobro.is_some() || self.buscando
+        self.editor.is_some() || self.confirmar.is_some() || self.cobro.is_some() || self.buscando || self.clientes.as_ref().is_some_and(Clientes::capturando)
+    }
+
+    /// Los clientes no son de un año.
+    fn usa_anio(&self) -> bool {
+        self.clientes.is_none()
     }
 
     fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         self.cerrado = autonomo::cerrado(&ctx.datos, ctx.anio);
+        if let Some(c) = &mut self.clientes {
+            return c.dibujar(f, area, ctx);
+        }
         if let Some(ed) = &mut self.editor {
             ed.dibujar(f, area, ctx);
         } else {
@@ -785,25 +850,25 @@ impl Pantalla for Facturas {
                 self.ver = false;
             }
             match actual {
-                Some(x) if self.ver => {
-                    let t = if x.numero.is_empty() { "Borrador".to_string() } else { format!("Factura {}", x.numero) };
-                    self.dibujar_detalle(f, area, x, &t, false);
-                }
+                Some(x) if self.ver => self.dibujar_detalle(f, area, x, false),
                 _ => {
-                    let resto = if area.height >= 12 {
-                        let [a_kpi, resto] = Layout::vertical([Constraint::Length(5), Constraint::Min(3)]).areas(area);
-                        self.dibujar_kpis(f, a_kpi, ctx);
+                    // Arriba, los filtros (y la búsqueda); debajo, el resumen del año, si cabe; y la lista, con el
+                    // detalle de la elegida a la derecha si hay sitio.
+                    let [a_fil, resto] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+                    self.dibujar_filtros(f, a_fil, ctx, lista.len());
+                    let resto = if area.height >= 16 {
+                        let [a_res, _, resto] = Layout::vertical([Constraint::Length(4), Constraint::Length(1), Constraint::Min(1)]).areas(resto);
+                        self.dibujar_resumen(f, a_res, ctx);
                         resto
                     } else {
-                        area
+                        resto
                     };
                     if area.width >= 110 {
                         let w_panel = (area.width * 35 / 100).clamp(40, 56);
-                        let [a_l, a_p] = Layout::horizontal([Constraint::Min(40), Constraint::Length(w_panel)]).areas(resto);
+                        let [a_l, _, a_p] = Layout::horizontal([Constraint::Min(40), Constraint::Length(4), Constraint::Length(w_panel)]).areas(resto);
                         self.dibujar_lista(f, a_l, ctx, &lista);
-                        match actual {
-                            Some(x) => self.dibujar_detalle(f, a_p, x, "Detalle", true),
-                            None => f.render_widget(Paragraph::new("").block(bloque("Detalle")), a_p),
+                        if let Some(x) = actual {
+                            self.dibujar_detalle(f, a_p, x, true);
                         }
                     } else {
                         self.dibujar_lista(f, resto, ctx, &lista);
@@ -854,6 +919,16 @@ impl Pantalla for Facturas {
             self.tecla_editor(ed, k, ctx);
             return true;
         }
+        if let Some(c) = &mut self.clientes {
+            return match c.tecla(k, ctx) {
+                clientes::Tecla::Usada => true,
+                clientes::Tecla::NoUsada => false,
+                clientes::Tecla::Cerrar => {
+                    self.clientes = None;
+                    true
+                }
+            };
+        }
         let n = self.lista(&ctx.datos, ctx.anio).len();
         if self.buscando {
             match k.code {
@@ -896,7 +971,7 @@ impl Pantalla for Facturas {
             }
         }
         // Un año cerrado se mira, pero no se crean, emiten, cobran, duplican ni borran facturas.
-        if autonomo::cerrado(&ctx.datos, ctx.anio) && matches!(k.code, KeyCode::Char('n' | 'e' | 'E' | 'c' | 'D' | 'd') | KeyCode::Delete) {
+        if autonomo::cerrado(&ctx.datos, ctx.anio) && matches!(k.code, KeyCode::Char('n' | 'E' | 'c' | 'D' | 'd') | KeyCode::Delete) {
             ctx.error(autonomo::aviso_cerrado(ctx.anio));
             return true;
         }
@@ -934,7 +1009,6 @@ impl Pantalla for Facturas {
                 self.busca = Entrada::default();
                 self.sel = 0;
             }
-            KeyCode::Char('e') => self.editar(ctx),
             KeyCode::Char('E') => {
                 if let Some(i) = self.elegida(ctx) {
                     let x = ctx.datos.facturas[i].clone();
@@ -959,13 +1033,17 @@ impl Pantalla for Facturas {
                     ctx.abrir_doc(&doc);
                 }
             }
-            KeyCode::Char('r') | KeyCode::Char('R') => ctx.info("Las rectificativas aún no se pueden hacer en la app."),
+            KeyCode::Char('R') => ctx.info("Las rectificativas aún no se pueden hacer en la app."),
+            KeyCode::Char('C') => self.abrir_clientes(ctx),
             _ => return false,
         }
         true
     }
 
     fn atajos(&self) -> Vec<(&'static str, &'static str)> {
+        if let Some(c) = &self.clientes {
+            return c.atajos();
+        }
         if self.confirmar.is_some() {
             return vec![("Enter/s", "sí"), ("Esc/n", "cancelar")];
         }
@@ -980,25 +1058,57 @@ impl Pantalla for Facturas {
         }
         if self.cerrado {
             let mut v = match self.elegida {
-                Some(_) if self.ver => vec![("← →", "otra"), ("↑↓", "bajar"), ("Esc", "volver"), ("o", "doc")],
+                Some(_) if self.ver => vec![("← →", "otra"), ("↑↓", "bajar"), ("Esc", "volver"), ("o", "doc"), ("C", "su cliente")],
                 Some(_) => vec![("Enter", "ver"), ("o", "doc")],
                 None => vec![],
             };
             if !self.ver {
-                v.extend([("f", "filtro"), ("/", "buscar")]);
+                v.extend([("f", "filtro"), ("/", "buscar"), ("C", "clientes")]);
             }
             return v;
         }
         let mut v = match self.elegida {
             Some(true) => vec![("Enter", "editar"), ("E", "emitir"), ("d", "borrar"), ("D", "duplicar")],
-            Some(false) if self.ver => vec![("← →", "otra"), ("↑↓", "bajar"), ("Esc", "volver"), ("c", "cobrada"), ("D", "duplicar"), ("o", "doc")],
+            Some(false) if self.ver => vec![("← →", "otra"), ("Esc", "volver"), ("c", "cobrada"), ("D", "duplicar"), ("o", "doc"), ("C", "su cliente")],
             Some(false) => vec![("Enter", "ver"), ("c", "cobrada"), ("D", "duplicar"), ("o", "doc")],
             None => vec![],
         };
         v.insert(0, ("n", "nueva"));
         if !self.ver {
-            v.extend([("f", "filtro"), ("/", "buscar")]);
+            v.extend([("f", "filtro"), ("/", "buscar"), ("C", "clientes")]);
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::prueba::{app_con, cargar, caso, ir, pantalla, teclas};
+    use crate::dominio::fmt::anio_actual;
+
+    /// Al estilo C2, sin cajas: los filtros arriba (con su tecla), el resumen del año con puntos guía, la cabecera
+    /// de las columnas en minúscula y las cifras sin «€»; Enter, el detalle con los totales; y n, el editor.
+    #[test]
+    fn la_lista_el_detalle_y_el_editor() {
+        let dir = caso("a-de-todo");
+        let mut d = cargar(&dir);
+        super::super::tests::factura_de_hoy(&mut d);
+        let mut a = app_con(d, &dir);
+        ir(&mut a, "Facturas");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("f  Todas    Pendientes de cobro    Borradores ") && p.contains(&format!("facturado en {} ··", anio_actual())), "{p}");
+        assert!(p.contains("pendiente de cobro ··") && !p.contains('│') && !p.contains('╭'), "{p}");
+        let cabecera = p.lines().find(|l| l.contains("número")).unwrap_or_default();
+        assert!(cabecera.contains("cliente") && cabecera.contains("total") && cabecera.contains("estado"), "{p}");
+        let fila = p.lines().find(|l| l.contains("HOY-1")).unwrap_or_default();
+        assert!(fila.contains("Zeta Pruebas") && fila.contains(" 121,00  ") && fila.ends_with("pendiente"), "{p}");
+        teclas(&mut a, "<enter>");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("Factura HOY-1   Emitida · pendiente") && p.contains("total a cobrar ··") && p.contains(" 121,00 €"), "{p}");
+        teclas(&mut a, "<esc>n<esc>");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("Nueva factura (borrador)") && p.contains("› Cliente") && p.contains("líneas (0)"), "{p}");
+        // Y en un terminal estrecho, también.
+        assert!(pantalla(&mut a, 80, 24).contains("líneas (0)"));
     }
 }

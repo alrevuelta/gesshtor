@@ -1,13 +1,17 @@
-//! Los datos de una persona, tal cual se guardan en `datos.json` (ver `dominio::almacen`): lo que apunta (facturas, gastos,
-//! clientes, nóminas, ajustes) y lo que se trae con el certificado (lo presentado en Hacienda y lo de la
-//! Seguridad Social). Lo leído de los PDF no se guarda aquí: está en `cache.json` y vive en `lecturas`.
+//! Los datos de una persona (ver `dominio::almacen`): lo que apunta (facturas, gastos, clientes, nóminas, ajustes),
+//! que es lo que va en `datos.json`, y lo que se trae con el certificado (lo presentado en Hacienda y lo de la
+//! Seguridad Social) o se lee de los PDF, que va cada cosa en su fichero de `fuentes/` (ver `fuente`).
 //!
-//! Las facturas y los gastos, con lo que se calcula con ellos, están en `factura` y `gasto`.
+//! Las facturas y los gastos, con lo que se calcula con ellos, están en `factura` y `gasto`; lo de tus inversiones
+//! (lo que trae un bróker, en un formato común), en `inversiones`.
 pub mod almacen;
 pub mod factura;
+pub mod fallo;
 pub mod fmt;
+pub mod fuente;
 pub mod gasto;
 pub mod hacienda;
+pub mod inversiones;
 pub mod renta;
 pub mod tgss;
 
@@ -36,8 +40,9 @@ impl Num {
     }
 }
 
-/// La versión de `datos.json`. Uno de otra versión no se abre.
-pub const VERSION: u32 = 2;
+/// La versión de `datos.json`. Uno de una versión anterior se pone al día al abrirlo, paso a paso
+/// (`almacen::MIGRACIONES`); uno de otra, no se abre. Un cambio de formato: subirla y añadir su paso.
+pub const VERSION: u32 = 3;
 
 /// El primer año que trata la app: lo anterior no se lee, ni se consulta, ni se enseña.
 pub const PRIMER_ANIO: i32 = 2020;
@@ -51,16 +56,36 @@ pub struct Datos {
     pub fiscal: Fiscal,
     pub clientes: Vec<Cliente>,
     pub facturas: Vec<Factura>,
+    /// Los apuntados y, sin guardarse, los recibos de autónomo de la Seguridad Social (`gasto::con_recibos`).
+    #[serde(serialize_with = "sin_recibos")]
     pub gastos: Vec<Gasto>,
     /// Nóminas apuntadas a mano, una por mes.
     pub nominas: Vec<Nomina>,
-    /// Lo presentado en Hacienda, por año (lo que dio la última consulta).
+    /// Los conectores con brókeres que has activado (desactivados por defecto).
+    pub inversiones: inversiones::Inversiones,
+    /// Lo presentado en Hacienda, por año (lo que dio la última consulta). No va en `datos.json` (sí en el de la
+    /// versión 2, de donde se lee para convertirlo): está en `fuentes/aeat-AAAA-consulta.json`.
+    #[serde(skip_serializing)]
     pub hacienda: BTreeMap<i32, hacienda::Consulta>,
-    /// Lo de la Seguridad Social: autónomo y cotizaciones de las nóminas.
+    /// Lo de la Seguridad Social: autónomo y cotizaciones de las nóminas. Como `hacienda`: en `fuentes/tgss.json`.
+    #[serde(skip_serializing)]
     pub tgss: tgss::Tgss,
-    /// Lo leído de los PDF de Hacienda de la carpeta (lo pone `hacienda::lectura` al arrancar; se guarda en `cache.json`).
+    /// Lo traído de cada bróker que has conectado (id del conector → lo último), de `fuentes/<id>.json`.
+    #[serde(skip)]
+    pub carteras: BTreeMap<String, fuente::Fuente<inversiones::Cartera>>,
+    /// Lo leído de los PDF de Hacienda de la carpeta (lo pone `hacienda::lectura` al arrancar; cada uno está en su
+    /// fichero de `fuentes/`).
     #[serde(skip)]
     pub lecturas: Lecturas,
+    /// Lo traído que falló la última vez que se intentó (lo de la Seguridad Social, lo presentado de un año) o que
+    /// no se entiende en `fuentes/`: su fichero → por qué. Los PDF, en `lecturas.fallos`. Ver `fallos`.
+    #[serde(skip)]
+    pub fallos: BTreeMap<String, fallo::Error>,
+}
+
+/// Al guardar, los gastos apuntados: los recibos de la Seguridad Social salen de `tgss`.
+fn sin_recibos<S: serde::Serializer>(v: &[Gasto], s: S) -> Result<S::Ok, S::Error> {
+    v.iter().filter(|g| !g.es_recibo()).collect::<Vec<_>>().serialize(s)
 }
 
 impl Datos {
@@ -79,9 +104,14 @@ impl Datos {
         (&self.perfil.fecha_alta, &self.perfil.fecha_baja)
     }
 
+    /// Todo lo que falló la última vez que se leyó o se trajo (lo traído y los PDF): para enseñarlo y copiarlo.
+    pub fn fallos(&self) -> impl Iterator<Item = &fallo::Error> {
+        self.fallos.values().chain(self.lecturas.fallos.values())
+    }
+
     /// El primer año con facturas o gastos apuntados; como mucho, el actual.
     pub fn primer_anio_con_apuntes(&self) -> i32 {
-        let fechas = self.facturas.iter().map(|f| f.fecha.as_str()).chain(self.gastos.iter().map(|g| g.fecha.as_str()));
+        let fechas = self.facturas.iter().map(|f| f.fecha.as_str()).chain(gasto::apuntados(self).map(|g| g.fecha.as_str()));
         fechas.map(fmt::anio_de).filter(|a| *a > 0).fold(fmt::anio_actual(), i32::min)
     }
 }
@@ -97,9 +127,12 @@ impl Default for Datos {
             facturas: Vec::new(),
             gastos: Vec::new(),
             nominas: Vec::new(),
+            inversiones: inversiones::Inversiones::default(),
             hacienda: BTreeMap::new(),
             tgss: tgss::Tgss::default(),
+            carteras: BTreeMap::new(),
             lecturas: Lecturas::default(),
+            fallos: BTreeMap::new(),
         }
     }
 }
@@ -126,8 +159,8 @@ pub struct Lecturas {
     pub rentas: BTreeMap<i32, renta::Renta>,
     /// Las declaraciones con casillas (303, 130, 390…), por clave «2026-3T-303» / «2025-390».
     pub formularios: BTreeMap<String, FormularioLeido>,
-    /// Lo que no se ha podido leer: clave → motivo.
-    pub fallos: BTreeMap<String, String>,
+    /// Lo que no se ha podido leer la última vez (aunque se quede lo que se leyó bien antes): clave → por qué.
+    pub fallos: BTreeMap<String, fallo::Error>,
 }
 
 /// Una declaración leída de su PDF: las casillas que se ven, con su número.
@@ -138,7 +171,8 @@ pub struct FormularioLeido {
     /// Cómo se presentó (a ingresar, a compensar, a devolver…), si se ve en la portada.
     #[serde(with = "hacienda::letra")]
     pub tipo: Option<hacienda::Tipo>,
-    /// Nombre del PDF en justificantes/.
+    /// Nombre del PDF en justificantes/ (lo pone `hacienda::lectura`; en `fuentes/` ya lo dice el `origen`).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub pdf: String,
     /// Número de justificante que figura en el PDF.
     pub justificante: String,
@@ -230,6 +264,9 @@ pub struct Nomina {
     pub retenciones: f64,
     /// Seguridad Social que te descuentan.
     pub ss: f64,
+    /// La nómina en PDF o en foto, si se metió arrastrándola (en documentos/).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub doc: String,
 }
 
 impl Nomina {

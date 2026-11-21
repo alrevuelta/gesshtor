@@ -6,12 +6,14 @@
 //!   modelo con casillas y cómo se lee uno cualquiera).
 //! - `consulta`: preguntar a Hacienda lo presentado cada año (servicio documentado) y bajar sus PDF (por el CSV),
 //!   con `xml` para leer sus respuestas. Es igual para todos los modelos.
-//! - `lectura`: leer los PDF de `justificantes/` (cada uno con el lector de su modelo), con `pdf` (sacar el texto),
-//!   `generico` (las casillas de cualquier modelo, tal como se ven) y `cache` (lo ya leído); las pruebas
-//!   usan PDF hechos por Hacienda con datos inventados (`pruebas/pdf/`; la Renta, de momento, `pruebas/renta_*.json`).
-//! - `irpf`: el IRPF de la actividad (acumulado desde el 1 de enero) y el de un sueldo, con las reglas de cada año.
+//! - `lectura`: leer los PDF de `justificantes/` (cada uno con el lector de su modelo, y lo leído a `fuentes/`), con
+//!   `pdf` (sacar el texto) y `generico` (las casillas de cualquier modelo, tal como se ven); las pruebas
+//!   de la Renta leen PDF de verdad (`pruebas/renta_*.pdf`), que no van al repositorio.
+//! - `irpf`: el IRPF de la actividad (acumulado desde el 1 de enero) y el de un sueldo, con las reglas de cada año;
+//!   `ahorro`, las del ahorro (su escala, compensar, recomprar, la doble imposición).
+//! - `modelo_720`: cuándo toca presentar el 720 (bienes en el extranjero) y el 721 (criptomonedas); no se leen.
 //!   Las facturas y los gastos, con lo que se calcula con ellos, están en `dominio::factura` y `dominio::gasto`.
-mod cache;
+pub mod ahorro;
 pub mod consulta;
 pub mod formulario;
 pub mod generico;
@@ -22,6 +24,7 @@ pub mod modelo_100;
 pub mod modelo_130;
 pub mod modelo_303;
 pub mod modelo_390;
+pub mod modelo_720;
 pub mod pdf;
 mod xml;
 

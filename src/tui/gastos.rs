@@ -6,7 +6,7 @@ use crate::dominio::fmt::{self, r2};
 use crate::dominio::{Datos, Gasto};
 use crate::dominio::almacen;
 use crate::informe::autonomo;
-use crate::tui::widgets::{bloque, coincide, derecha, kpi, tema, Confirmar, Eleccion, Entrada, Respuesta, Selector};
+use crate::tui::widgets::{coincide, derecha, filas_partidas, guia, linea_atajos, tema, titulo_bloque, Confirmar, Eleccion, Entrada, Respuesta, Selector};
 use crate::tui::texto::lineas;
 use crate::tui::{Ctx, Nivel, Pantalla};
 use formulario::{Edicion, Fin};
@@ -16,10 +16,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
+use super::gastos_cuotas as cuotas;
 use super::gastos_formulario as formulario;
+use crate::dominio::tgss::Recibo;
 
 /// Ancho a partir del cual la ficha del gasto elegido va al lado de la lista.
 const ANCHO_FICHA: u16 = 110;
+/// La ficha a pantalla completa, no más ancha de lo que se lee bien (como el detalle de una factura).
+const ANCHO_HOJA: u16 = 60;
 
 #[derive(Default)]
 pub struct Gastos {
@@ -66,6 +70,44 @@ struct Totales {
     amort: f64,
     n: usize,
     con_doc: usize,
+}
+
+/// Columnas de la lista, en su orden (se quitan las menos importantes si no caben).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Col {
+    Fecha,
+    Proveedor,
+    Concepto,
+    Categoria,
+    Base,
+    Iva,
+    IvaDed,
+    Irpf,
+    Doc,
+}
+
+impl Col {
+    fn titulo(self) -> &'static str {
+        match self {
+            Col::Fecha => "fecha",
+            Col::Proveedor => "proveedor",
+            Col::Concepto => "concepto",
+            Col::Categoria => "categoría",
+            Col::Base => "base",
+            Col::Iva => "IVA",
+            Col::IvaDed => "IVA deduc.",
+            Col::Irpf => "gasto IRPF",
+            Col::Doc => "",
+        }
+    }
+    /// Las de cifras, a la derecha.
+    fn numero(self) -> bool {
+        matches!(self, Col::Base | Col::Iva | Col::IvaDed | Col::Irpf)
+    }
+}
+
+fn plural(n: usize) -> String {
+    if n == 1 { "1 gasto".into() } else { format!("{n} gastos") }
 }
 
 /* ================= piezas que usa también el formulario ================= */
@@ -115,14 +157,16 @@ fn renta(cat: &Cat) -> String {
     RENTA_LINEAS.iter().find(|r| r.0 == cat.renta).map(|r| format!("casilla {} · {}", r.1, r.2)).unwrap_or_default()
 }
 
-/// Líneas de una ficha «etiqueta  valor»: lo que no cabe sigue debajo del valor, no de la etiqueta.
+/// Las líneas de una ficha de `ancho` columnas: «etiqueta  valor» con la etiqueta en gris (lo que no cabe sigue
+/// debajo del valor, no de la etiqueta) y las cifras con puntos guía, acabando en `ancho`.
 pub(super) struct Hoja {
     ancho: usize,
     pub(super) t: Vec<Line<'static>>,
 }
 
 impl Hoja {
-    const ETIQUETA: usize = 15;
+    /// Ancho de las etiquetas («nº factura» y un hueco), como en el detalle de una factura.
+    const ETIQUETA: usize = 14;
 
     pub(super) fn new(ancho: u16) -> Self {
         Hoja { ancho: ancho as usize, t: Vec::new() }
@@ -134,24 +178,35 @@ impl Hoja {
             self.t.push(Line::from(vec![Span::styled(k, tema::apagado()), Span::raw(p)]));
         }
     }
+    /// Una cifra con puntos guía: la etiqueta (un texto o varios trozos) y la cifra en negrita con `estilo`.
+    fn cifra(&mut self, etiqueta: impl Into<Line<'static>>, cifra: String, estilo: Style) {
+        self.t.push(guia(etiqueta, cifra, estilo, self.ancho as u16));
+    }
     pub(super) fn push(&mut self, l: Line<'static>) {
         self.t.push(l);
     }
+    fn blanco(&mut self) {
+        self.t.push(Line::from(""));
+    }
 }
 
-/// El desglose de `gasto_calc`: base, IVA, lo deducible, lo pagado y la línea de la Renta.
+/// El desglose de `gasto_calc`, con puntos guía: lo de la factura (la base, el IVA y lo pagado, en negrita) y, debajo,
+/// lo que te deduces (en BIEN, con su % en gris) y la línea de la Renta.
 pub(super) fn cifras(g: &Gasto, c: &GastoCalc, h: &mut Hoja) {
-    h.kv(if c.origen == "es" { "Base" } else { "Importe" }, fmt::eur(c.base));
+    let (normal, gris, verde) = (Style::new(), tema::apagado(), Style::new().fg(tema::BIEN));
+    h.cifra(if c.origen == "es" { "base" } else { "importe" }, fmt::eur(c.base), normal);
     if c.origen != "sin" {
         let nota = if c.origen != "es" { " (la autoliquidas)" } else if g.cuota.vacio() { " (calculada)" } else { "" };
-        h.kv("IVA", format!("{} · {}{nota}", fmt::pct(c.tipo), fmt::eur(c.cuota)));
+        h.cifra(Line::from(vec![Span::raw(format!("IVA {}", fmt::pct(c.tipo))), Span::styled(nota, gris)]), fmt::eur(c.cuota), normal);
     }
+    h.cifra(Span::styled("pagado", Style::new().add_modifier(Modifier::BOLD)), fmt::eur(c.pagado), normal);
+    h.blanco();
     let no_ded = if c.origen == "es" && g.iva_no_ded && c.cuota > 0.0 { " · no deducible" } else { "" };
-    h.kv("IVA deducible", format!("{} ({}){no_ded}", fmt::eur(c.iva_ded), fmt::pct(c.p_iva)));
-    let amort = if c.amortizable { " · se amortiza" } else { "" };
-    h.kv("Gasto en IRPF", format!("{} ({}){amort}", fmt::eur(c.coste), fmt::pct(c.p_irpf)));
-    h.kv("Pagado", fmt::eur(c.pagado));
-    h.kv("Renta", renta(c.cat));
+    h.cifra(Line::from(vec![Span::raw("IVA deducible "), Span::styled(format!("{}{no_ded}", fmt::pct(c.p_iva)), gris)]), fmt::eur(c.iva_ded), verde);
+    // Corto, para que quepa en la ficha de al lado.
+    let amort = if c.amortizable { " · amortiza" } else { "" };
+    h.cifra(Line::from(vec![Span::raw("gasto en IRPF "), Span::styled(format!("{}{amort}", fmt::pct(c.p_irpf)), gris)]), fmt::eur(c.coste), verde);
+    h.kv("renta", renta(c.cat));
 }
 
 /// Lo que te deduces, en frases (debajo del formulario). La primera es la principal.
@@ -216,46 +271,60 @@ fn dia_mes(s: &str) -> String {
     f.rsplit_once(' ').map(|(a, _)| a.to_string()).unwrap_or(f)
 }
 
-/// La ficha de un gasto (en `ancho` columnas): datos, desglose, amortización, ayuda de la categoría y notas.
+/// La ficha de un gasto (en `ancho` columnas), al estilo del detalle de una factura: quién y qué, arriba y en el color
+/// de la sección; los datos, con las etiquetas en gris; el desglose y lo que te deduces, con puntos guía; la
+/// amortización; y lo que te deduces en frases, la ayuda de la categoría y las notas.
 fn lineas_ficha(g: &Gasto, ctx: &Ctx, ancho: u16) -> Vec<Line<'static>> {
     let d = &ctx.datos;
     let c = gasto::gasto_calc(g, d);
+    if let Some(r) = gasto::recibo_de(g, d) {
+        return ficha_recibo(g, r, &c, ancho);
+    }
     let mut t = Hoja::new(ancho);
-    t.push(Line::styled(nombre(g), Style::new().add_modifier(Modifier::BOLD)));
+    if c.repetido {
+        t.push(Line::styled("No cuenta: ese mes ya está el recibo de la Seguridad Social.", Style::new().fg(tema::AVISO).add_modifier(Modifier::BOLD)));
+        t.blanco();
+    }
+    t.push(Line::styled(nombre(g), tema::titulo()));
     if !g.proveedor.is_empty() && !g.concepto.is_empty() {
         t.push(Line::from(g.concepto.clone()));
     }
-    t.push(Line::from(""));
-    t.kv("Fecha", fmt::dmy(&g.fecha));
+    t.blanco();
+    t.kv("fecha", fmt::fecha_corta(&g.fecha));
     if !g.num_factura.is_empty() {
-        t.kv("Nº factura", g.num_factura.clone());
+        t.kv("nº factura", g.num_factura.clone());
     }
     if !g.nif.is_empty() {
         t.kv("NIF", g.nif.clone());
     }
-    t.kv("Categoría", c.cat.label);
+    t.kv("categoría", c.cat.label);
     let origen = ORIGENES.iter().find(|o| o.0 == c.origen).map(|o| o.1).unwrap_or(c.origen.as_str()).to_string();
-    t.kv("Origen", origen);
-    cifras(g, &c, &mut t);
+    t.kv("origen", origen);
     let doc = if g.doc.is_empty() {
         "ninguno".to_string()
     } else if almacen::documento(&ctx.dir, &g.doc).is_some() {
-        format!("{} (o: abrir)", g.doc)
+        format!("{} (o abrir)", g.doc)
     } else {
         format!("{} (no está en la carpeta)", g.doc)
     };
-    t.kv("Documento", doc);
+    t.kv("documento", doc);
+    t.blanco();
+    cifras(g, &c, &mut t);
     if c.amortizable {
+        let normal = Style::new();
         let coef = gasto::amort_coef(g);
         let clave = if g.amort_tipo.is_empty() { c.cat.amort } else { g.amort_tipo.as_str() };
         let tabla = AMORT.iter().find(|a| a.0 == clave).map(|a| a.1).unwrap_or("Mobiliario y enseres");
-        t.kv("Amortización", format!("{tabla}, {} al año", fmt::pct(coef)));
-        t.kv("", format!("{} al año de {}", fmt::eur(r2(c.coste * coef / 100.0)), fmt::eur(c.coste)));
+        t.blanco();
+        t.push(titulo_bloque("amortización"));
+        t.kv("tabla", format!("{tabla}, {} al año", fmt::pct(coef)));
+        t.cifra(format!("al año, de {}", fmt::eur(c.coste)), fmt::eur(r2(c.coste * coef / 100.0)), normal);
         let a = ctx.anio;
         let fin = format!("{a}-12-31");
         let este = gasto::amort_en_rango(g, &c, &format!("{a}-01-01"), &fin);
         let hecha = gasto::amort_en_rango(g, &c, &g.fecha, &fin);
-        t.kv(&format!("En {a}"), format!("{} · queda {}", fmt::eur(este), fmt::eur((c.coste - hecha).max(0.0))));
+        t.cifra(format!("en {a}"), fmt::eur(este), normal);
+        t.cifra("queda", fmt::eur((c.coste - hecha).max(0.0)), normal);
         // Año a año, hasta que se acaba (por días: el primer año y el último van partidos).
         let ini = fmt::anio_de(&g.fecha);
         let anios = (100.0 / coef.max(1.0)).ceil() as i32;
@@ -264,7 +333,7 @@ fn lineas_ficha(g: &Gasto, ctx: &Ctx, ancho: u16) -> Vec<Line<'static>> {
             .collect();
         t.push(Line::styled(partes.join(" · "), tema::apagado()));
     }
-    t.push(Line::from(""));
+    t.blanco();
     let mut fr = frases(g, &c, d).into_iter();
     if let Some(p) = fr.next() {
         t.push(Line::styled(p, Style::new().fg(tema::BIEN)));
@@ -274,13 +343,41 @@ fn lineas_ficha(g: &Gasto, ctx: &Ctx, ancho: u16) -> Vec<Line<'static>> {
     }
     let p = c.cat.ayuda;
     if !p.is_empty() {
-        t.push(Line::from(""));
+        t.blanco();
         t.push(Line::styled(p, tema::apagado().italic()));
     }
     if !g.notas.is_empty() {
-        t.push(Line::from(""));
-        t.kv("Notas", g.notas.clone());
+        t.blanco();
+        t.kv("notas", g.notas.clone());
     }
+    t.t
+}
+
+/// La ficha de un recibo de autónomo de la Seguridad Social: el cargo y, con puntos guía, el importe, su desglose
+/// (en gris), la base y lo que cuenta en el IRPF.
+fn ficha_recibo(g: &Gasto, r: &Recibo, c: &GastoCalc, ancho: u16) -> Vec<Line<'static>> {
+    let (normal, gris) = (Style::new(), tema::apagado());
+    let mut t = Hoja::new(ancho);
+    t.push(Line::styled(g.concepto.clone(), tema::titulo()));
+    t.push(Line::styled("Recibo de autónomo de la Seguridad Social", gris));
+    t.blanco();
+    t.kv("cargo", if fmt::fecha(r.fecha_cargo()).is_some() { fmt::fecha_corta(r.fecha_cargo()) } else { r.fecha_cargo().to_string() });
+    if !r.periodo.is_empty() {
+        t.kv("de", fmt::nombre_mes(&r.periodo));
+    }
+    t.blanco();
+    t.cifra(Span::styled("importe", Style::new().add_modifier(Modifier::BOLD)), fmt::eur(r.importe), normal);
+    for (n, x) in cuotas::desglose(r) {
+        t.cifra(Span::styled(format!("  {n}"), gris), fmt::eur(x), gris);
+    }
+    if let Some(b) = r.base() {
+        t.cifra(Line::from(vec![Span::raw("base"), Span::styled(" (contingencias comunes)", gris)]), format!("≈ {}", fmt::eur(b)), normal);
+    }
+    t.blanco();
+    t.cifra("gasto en IRPF", fmt::eur(c.coste), Style::new().fg(tema::BIEN));
+    t.kv("renta", renta(c.cat));
+    t.blanco();
+    t.push(Line::styled("Sale de lo que traes de la Seguridad Social con tu certificado: no se apunta ni se cambia aquí.", gris.italic()));
     t.t
 }
 
@@ -459,7 +556,7 @@ impl Gastos {
         // Un año cerrado se mira (Enter abre la ficha), pero no se apuntan, cambian, duplican ni borran gastos.
         if autonomo::cerrado(&ctx.datos, ctx.anio) {
             match k.code {
-                KeyCode::Char('n' | 'e' | 'd' | 'D') | KeyCode::Delete => {
+                KeyCode::Char('n' | 'd' | 'D') | KeyCode::Delete => {
                     ctx.error(autonomo::aviso_cerrado(ctx.anio));
                     return true;
                 }
@@ -473,6 +570,13 @@ impl Gastos {
                 KeyCode::Enter => return true,
                 _ => {}
             }
+        }
+        // Un recibo de la Seguridad Social se mira, pero no se cambia, duplica ni borra.
+        let recibo = self.elegido(ctx).is_some_and(Gasto::es_recibo);
+        let cambiar = matches!(k.code, KeyCode::Char('d' | 'D') | KeyCode::Delete) || (k.code == KeyCode::Enter && (ficha || self.ficha_al_lado()));
+        if recibo && cambiar {
+            ctx.info("Es un recibo de la Seguridad Social: sale de lo que traes con tu certificado y no se cambia aquí.");
+            return true;
         }
         match k.code {
             KeyCode::Up => self.sel = self.sel.saturating_sub(1),
@@ -507,7 +611,7 @@ impl Gastos {
                     self.desplaza = 0;
                 }
             }
-            KeyCode::Enter | KeyCode::Char('e') => self.editar(ctx),
+            KeyCode::Enter => self.editar(ctx),
             KeyCode::Char('d') | KeyCode::Delete => self.preguntar_borrar(ctx),
             KeyCode::Char('D') => {
                 if let Some(g) = self.elegido(ctx).cloned() {
@@ -526,58 +630,120 @@ impl Gastos {
 
     /* ---------------- dibujo ---------------- */
 
-    fn nota(&self, ctx: &Ctx) -> String {
-        let mut v = Vec::new();
+    /// Filtrando por la cuota de autónomos: lo de tus cuotas del año.
+    fn cuotas(&self, ctx: &Ctx) -> Option<autonomo::CuotasAnio> {
+        (self.cat == "ss").then(|| autonomo::cuotas_anio(&ctx.datos, ctx.anio, &fmt::hoy()))
+    }
+
+    /// Lo de debajo de la lista, cada cosa con su estilo: los gastos con fecha futura, las cuotas repetidas y,
+    /// filtrando por la cuota de autónomos, lo de tus cuotas.
+    fn nota(&self, ctx: &Ctx) -> Vec<(String, Style)> {
+        let mut v: Vec<(String, Style)> = Vec::new();
         let hoy = fmt::hoy();
+        if let Some(c) = self.cuotas(ctx) {
+            v.extend(cuotas::notas(&c, &ctx.datos.tgss, &hoy).into_iter().map(|n| (n.texto, n.estilo)));
+        }
+        let repetidos = self.visibles(ctx).iter().filter(|&&i| gasto::repetido(&ctx.datos.gastos[i], &ctx.datos)).count();
+        if repetidos > 0 {
+            let (s, n) = if repetidos == 1 { ("", "") } else { ("s", "n") };
+            v.push((format!("{repetidos} cuota{s} apuntada{s} a mano no cuenta{n}: ese mes ya está el recibo."), Style::new().fg(tema::AVISO)));
+        }
         let fut = ctx.datos.gastos.iter().filter(|g| g.fecha > hoy).count();
         if fut == 1 {
-            v.push("1 gasto con fecha futura: no cuenta todavía.".to_string());
+            v.push(("1 gasto con fecha futura: no cuenta todavía.".to_string(), tema::apagado()));
         } else if fut > 1 {
-            v.push(format!("{fut} gastos con fecha futura: no cuentan todavía."));
+            v.push((format!("{fut} gastos con fecha futura: no cuentan todavía."), tema::apagado()));
         }
-        v.join(" · ")
+        v
     }
 
-    fn dibujar_kpis(&self, f: &mut Frame, area: Rect, ctx: &Ctx, vis: &[usize]) {
-        let t = self.totales(ctx, vis);
-        let [a, b, c, d] = Layout::horizontal([Constraint::Ratio(1, 4); 4]).areas(area);
-        let cuando = if self.q == 0 { format!("en {}", ctx.anio) } else { format!("en el {}T", self.q) };
-        let amort = if t.amort > 0.0 { format!("{} amortiz.", fmt::eur(t.amort)) } else { "coste en la Renta".into() };
-        kpi(f, a, &format!("Pagado {cuando}"), &fmt::eur(t.pagado), "base + IVA", Style::new());
-        kpi(f, b, "IVA deducible", &fmt::eur(t.iva), "resta en el 303", Style::new().fg(tema::BIEN));
-        kpi(f, c, "Deducible en IRPF", &fmt::eur(t.irpf), &amort, Style::new().fg(tema::BIEN));
-        kpi(f, d, "Nº de gastos", &t.n.to_string(), &format!("{} con documento", t.con_doc), Style::new());
+    /// Lo del periodo con puntos guía, como en Facturas: lo pagado, el IVA y el IRPF que te deduces (en BIEN) y
+    /// cuántos llevan documento, cada cifra con su nota en gris. Filtrando por la cuota de autónomos, las cifras de
+    /// tus cuotas.
+    fn dibujar_resumen(&self, f: &mut Frame, area: Rect, ctx: &Ctx, vis: &[usize]) {
+        let filas: Vec<(String, String, Style, String)> = match self.cuotas(ctx) {
+            Some(c) => cuotas::cifras(&c, &ctx.datos.tgss, &fmt::hoy()).into_iter().map(|c| (c.etiqueta, c.valor, c.estilo, c.nota)).collect(),
+            None => {
+                let t = self.totales(ctx, vis);
+                let verde = Style::new().fg(tema::BIEN);
+                let cuando = if self.q == 0 { format!("en {}", ctx.anio) } else { format!("en el {}T", self.q) };
+                let amort = if t.amort > 0.0 { format!("incluye {} de amortización", fmt::eur(t.amort)) } else { "coste en la Renta".into() };
+                vec![
+                    (format!("pagado {cuando}"), fmt::eur(t.pagado), Style::new(), format!("base + IVA de {}", plural(t.n))),
+                    ("IVA deducible".into(), fmt::eur(t.iva), verde, "resta en el 303".into()),
+                    ("deducible en IRPF".into(), fmt::eur(t.irpf), verde, amort),
+                    ("con documento".into(), t.con_doc.to_string(), Style::new(), format!("de {}", plural(t.n))),
+                ]
+            }
+        };
+        // Todas las cifras acaban en la misma columna, con al menos unos puntos.
+        let fin = filas.iter().map(|(e, c, ..)| e.chars().count() + c.chars().count() + 6).max().unwrap_or(0) as u16;
+        let v: Vec<Line> = filas
+            .into_iter()
+            .map(|(e, c, st, nota)| {
+                let mut l = guia(e, c, st, fin);
+                if !nota.is_empty() {
+                    l.push_span(Span::styled(format!("   {nota}"), tema::apagado()));
+                }
+                l
+            })
+            .collect();
+        f.render_widget(Paragraph::new(v), area);
     }
 
-    fn dibujar_filtros(&self, f: &mut Frame, area: Rect) {
-        let mut sp = vec![Span::raw(" ")];
+    /// Arriba de la lista, como en Facturas: los trimestres (con su tecla, `t`, delante y el elegido en FONDO sobre
+    /// el color de la sección), la categoría (con la `c`), el año y cuántos se ven y, a la derecha si caben, las teclas
+    /// de buscar y de quitar los filtros (abajo no caben todas); en la fila de debajo, si se busca, la búsqueda.
+    fn dibujar_filtros(&self, f: &mut Frame, area: Rect, ctx: &Ctx, n: usize) {
+        let gris = tema::apagado();
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
+        let mut trimestres = vec![Span::styled("t ", negrita)];
         for (i, t) in ["Año", "1T", "2T", "3T", "4T"].iter().enumerate() {
-            let st = if i as u32 == self.q { tema::pestana_activa() } else { tema::apagado() };
-            sp.push(Span::styled(format!(" {t} "), st));
+            if i > 0 {
+                trimestres.push(Span::raw(" "));
+            }
+            // Todos con su hueco a cada lado: al cambiar de trimestre no se mueve nada.
+            trimestres.push(Span::styled(format!(" {t} "), if i as u32 == self.q { tema::pestana_activa() } else { gris }));
         }
-        sp.push(Span::styled("  Categoría: ", tema::apagado()));
-        sp.push(if self.cat.is_empty() { Span::raw("todas") } else { Span::styled(cat_corta(&self.cat), Style::new().fg(tema::ACENTO).add_modifier(Modifier::BOLD)) });
-        let [izq, der] = Layout::horizontal([Constraint::Min(10), Constraint::Length(30)]).areas(area);
-        f.render_widget(Paragraph::new(Line::from(sp)), izq);
-        if self.buscando {
-            let [et, en] = Layout::horizontal([Constraint::Length(8), Constraint::Min(1)]).areas(der);
-            f.render_widget(Paragraph::new(Span::styled("Buscar: ", Style::new().fg(tema::ACENTO))), et);
-            self.busca.dibujar(f, en, true, Style::new().add_modifier(Modifier::UNDERLINED));
-        } else if !self.busca.valor.trim().is_empty() {
-            let t = Line::from(vec![Span::styled("Buscar: ", tema::apagado()), Span::styled(format!("«{}»", self.busca.valor.trim()), Style::new().fg(tema::ACENTO))]);
-            f.render_widget(Paragraph::new(t.right_aligned()), der);
-        } else {
-            f.render_widget(Paragraph::new(Line::styled("/ buscar ", tema::apagado()).right_aligned()), der);
+        let cuantos = [Span::styled(ctx.anio.to_string(), negrita), Span::styled(format!(" · {}", plural(n)), gris)];
+        // La categoría, con la `c` delante: la elegida, como el trimestre; si no hay, «todas», en gris.
+        let linea = |hueco: &'static str, largo: bool| {
+            let mut v = trimestres.clone();
+            v.extend([Span::raw(hueco), Span::styled("c ", negrita)]);
+            v.push(match self.cat.as_str() {
+                "" => Span::styled(if largo { " todas las categorías " } else { " todas " }, gris),
+                c => Span::styled(format!(" {} ", cat_corta(c)), tema::pestana_activa()),
+            });
+            v.push(Span::raw(hueco));
+            v.extend(cuantos.clone());
+            Line::from(v)
+        };
+        let teclas = if self.hay_filtros() { linea_atajos(&[("Esc", "sin filtros"), ("/", "buscar")]) } else { linea_atajos(&[("/", "buscar")]) };
+        // Lo más largo que quepa con las teclas a la derecha; si no caben, lo más largo que quepa.
+        let w = area.width as usize;
+        let variantes = [linea("     ", true), linea("   ", true), linea("   ", false)];
+        let con_teclas = !self.buscando && variantes.iter().any(|l| l.width() + 5 + teclas.width() <= w);
+        let l = if con_teclas { variantes.iter().find(|l| l.width() + 5 + teclas.width() <= w) } else { variantes.iter().find(|l| l.width() <= w) };
+        let l = l.unwrap_or(&variantes[2]).clone();
+        let fila = Rect { height: area.height.min(1), ..area };
+        f.render_widget(Paragraph::new(l), fila);
+        if con_teclas {
+            f.render_widget(Paragraph::new(teclas.right_aligned()), fila);
+        }
+        if (self.buscando || !self.busca.valor.trim().is_empty()) && area.height >= 2 {
+            let fila = Rect { y: area.y + 1, height: 1, ..area };
+            let [e, t] = Layout::horizontal([Constraint::Length(7), Constraint::Min(1)]).areas(fila);
+            f.render_widget(Paragraph::new(Span::styled("buscar", gris)), e);
+            self.busca.dibujar(f, t, self.buscando, negrita);
         }
     }
 
+    /// La lista, sin caja, como la de Facturas: la cabecera de las columnas en gris, las cifras a la derecha (sin «€»:
+    /// ya lo dice el resumen) y el elegido en el fondo suave de la sección; los de fecha futura y las cuotas repetidas,
+    /// en gris. Si no caben todas las columnas, se quitan las menos importantes (la primera, el concepto aparte).
     fn dibujar_tabla(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx, vis: &[usize]) {
         let d = &ctx.datos;
-        let cuando = if self.q == 0 { ctx.anio.to_string() } else { format!("{}T {}", self.q, ctx.anio) };
-        let titulo = format!("{} gasto{} · {cuando}", vis.len(), if vis.len() == 1 { "" } else { "s" });
-        let b = bloque(&titulo);
-        let dentro = b.inner(area);
-        self.filas = dentro.height.saturating_sub(1) as usize;
+        self.filas = area.height.saturating_sub(1) as usize;
         if vis.is_empty() {
             let txt = if self.hay_filtros() {
                 "Nada con estos filtros (Esc los quita).".to_string()
@@ -589,104 +755,123 @@ impl Gastos {
                 format!("Todavía no hay gastos en {}.", ctx.anio)
             };
             let pie = if self.cerrado { "Es un año cerrado: se ve en Impuestos, con tu Renta." } else { "Pulsa n para añadir uno." };
-            let t = vec![Line::from(""), Line::from(txt).centered(), Line::styled(pie, tema::apagado()).centered()];
-            f.render_widget(Paragraph::new(t).block(b), area);
+            f.render_widget(Paragraph::new(Line::styled(format!("{txt} {pie}"), tema::apagado())).wrap(Wrap { trim: false }), area);
             return;
         }
-        // Columnas según el ancho: el concepto aparte si cabe; si no, el IVA es lo primero que sobra.
-        let w = dentro.width;
-        let partido = w >= 100;
-        let con_iva = w >= 72;
-        let con_base = w >= 64;
-        let mut cab: Vec<Cell> = vec![Cell::from("Fecha"), Cell::from(""), Cell::from("Proveedor")];
-        let mut anchos = vec![Constraint::Length(6), Constraint::Length(1), Constraint::Fill(1)];
-        if partido {
-            cab.push(Cell::from("Concepto"));
-            anchos.push(Constraint::Fill(1));
+        let gastos: Vec<&Gasto> = vis.iter().map(|&i| &d.gastos[i]).collect();
+        let calc: Vec<GastoCalc> = gastos.iter().map(|g| gasto::gasto_calc(g, d)).collect();
+        // El texto de cada celda (sin estilo: la fila va entera en gris si no cuenta).
+        let texto = |c: Col, g: &Gasto, x: &GastoCalc, partido: bool| -> String {
+            match c {
+                Col::Fecha => dia_mes(&g.fecha),
+                Col::Proveedor if !partido => nombre(g),
+                Col::Proveedor if g.proveedor.is_empty() => "—".into(),
+                Col::Proveedor => g.proveedor.clone(),
+                Col::Concepto => g.concepto.clone(),
+                Col::Categoria => cat_corta(x.cat.id).into(),
+                Col::Base => fmt::num(x.base),
+                Col::Iva => match x.origen.as_str() {
+                    "ue" => "UE".into(),
+                    "extra" => "fuera UE".into(),
+                    _ if x.cuota == 0.0 => "—".into(),
+                    _ => fmt::num(x.cuota),
+                },
+                Col::IvaDed if x.iva_ded > 0.0 => fmt::num(x.iva_ded),
+                Col::IvaDed if x.origen == "es" && x.cuota > 0.0 => "no ded.".into(),
+                Col::IvaDed => "—".into(),
+                Col::Irpf if x.repetido => "repetido".into(),
+                Col::Irpf if x.amortizable => "amortiza".into(),
+                Col::Irpf if x.coste > 0.0 => fmt::num(x.coste),
+                Col::Irpf => "—".into(),
+                Col::Doc => if g.doc.is_empty() { String::new() } else { "▤".into() },
+            }
+        };
+        // El ancho de cada columna: lo más largo de ella, o su título; el proveedor y el concepto, 16 como poco.
+        let ancho = |c: Col| -> u16 {
+            match c {
+                // El concepto aparte, solo si cabe con holgura (si no, va en el proveedor).
+                Col::Concepto => 24,
+                Col::Proveedor => 16,
+                Col::Doc => 1,
+                _ => gastos.iter().zip(&calc).map(|(g, x)| texto(c, g, x, false).chars().count()).max().unwrap_or(0).max(c.titulo().chars().count()) as u16,
+            }
+        };
+        const ESPACIO: u16 = 2;
+        let mut cols = vec![Col::Fecha, Col::Proveedor, Col::IvaDed, Col::Irpf];
+        if gastos.iter().any(|g| !g.doc.is_empty()) {
+            cols.push(Col::Doc);
         }
-        cab.push(Cell::from("Categoría"));
-        anchos.push(Constraint::Length(11));
-        if con_base {
-            cab.push(Cell::from(derecha("Base")));
-            anchos.push(Constraint::Length(10));
+        for c in [Col::Categoria, Col::Base, Col::Iva, Col::Concepto] {
+            let ocupa: u16 = cols.iter().chain([&c]).map(|&c| ancho(c) + ESPACIO).sum();
+            if ocupa <= area.width {
+                cols.push(c);
+            }
         }
-        if con_iva {
-            cab.push(Cell::from(derecha("IVA")));
-            anchos.push(Constraint::Length(9));
-        }
-        cab.push(Cell::from(derecha("IVA deduc.")));
-        anchos.push(Constraint::Length(10));
-        cab.push(Cell::from(derecha("Gasto IRPF")));
-        anchos.push(Constraint::Length(10));
+        cols.sort();
+        let partido = cols.contains(&Col::Concepto);
+        let cabecera = Row::new(cols.iter().map(|&c| if c.numero() { Cell::from(derecha(c.titulo())) } else { Cell::from(c.titulo()) })).style(tema::cabecera_tabla());
         let hoy = fmt::hoy();
-        let filas: Vec<Row> = vis
+        let filas: Vec<Row> = gastos
             .iter()
-            .map(|&i| {
-                let g = &d.gastos[i];
-                let c = gasto::gasto_calc(g, d);
-                let doc = if g.doc.is_empty() { Span::raw("") } else { Span::styled("•", Style::new().fg(tema::ACENTO)) };
-                let quien = if partido { if g.proveedor.is_empty() { "—".to_string() } else { g.proveedor.clone() } } else { nombre(g) };
-                let mut celdas = vec![Cell::from(dia_mes(&g.fecha)), Cell::from(doc), Cell::from(quien)];
-                if partido {
-                    celdas.push(Cell::from(g.concepto.clone()));
-                }
-                celdas.push(Cell::from(cat_corta(c.cat.id)));
-                if con_base {
-                    celdas.push(Cell::from(derecha(fmt::eur(c.base))));
-                }
-                if con_iva {
-                    let iva = match c.origen.as_str() {
-                        "ue" => "UE".to_string(),
-                        "extra" => "fuera UE".to_string(),
-                        _ if c.cuota == 0.0 => "—".to_string(),
-                        _ => fmt::eur(c.cuota),
-                    };
-                    celdas.push(Cell::from(derecha(iva)));
-                }
-                let ded = if c.iva_ded > 0.0 {
-                    fmt::eur(c.iva_ded)
-                } else if c.origen == "es" && c.cuota > 0.0 {
-                    "no ded.".to_string()
-                } else {
-                    "—".to_string()
-                };
-                celdas.push(Cell::from(derecha(ded)));
-                let irpf = if c.amortizable {
-                    "amortiza".to_string()
-                } else if c.coste > 0.0 {
-                    fmt::eur(c.coste)
-                } else {
-                    "—".to_string()
-                };
-                celdas.push(Cell::from(derecha(irpf)));
-                let fila = Row::new(celdas);
-                if g.fecha > hoy { fila.style(tema::apagado()) } else { fila }
+            .zip(&calc)
+            .map(|(g, x)| {
+                let fila = Row::new(cols.iter().map(|&c| {
+                    let s = texto(c, g, x, partido);
+                    match c {
+                        _ if c.numero() => Cell::from(derecha(s)),
+                        Col::Fecha | Col::Doc => Cell::from(Span::styled(s, tema::apagado())),
+                        Col::Proveedor if !partido && g.proveedor.is_empty() && g.concepto.is_empty() => Cell::from(Span::styled(s, tema::apagado())),
+                        _ => Cell::from(s),
+                    }
+                }));
+                if g.fecha > hoy || x.repetido { fila.style(tema::apagado()) } else { fila }
             })
             .collect();
-        let tabla = Table::new(filas, anchos).header(Row::new(cab).style(tema::cabecera_tabla())).block(b).column_spacing(1).row_highlight_style(tema::seleccion());
+        let anchos = cols.iter().map(|&c| if matches!(c, Col::Proveedor | Col::Concepto) { Constraint::Fill(1) } else { Constraint::Length(ancho(c)) });
+        let tabla = Table::new(filas, anchos).header(cabecera).column_spacing(ESPACIO).row_highlight_style(tema::seleccion());
         self.tabla.select(Some(self.sel));
         f.render_stateful_widget(tabla, area, &mut self.tabla);
     }
 
+    /// La lista, como Facturas: arriba los filtros (y la búsqueda); debajo, lo del periodo con puntos guía, si cabe; la
+    /// tabla, con la ficha del elegido a la derecha si hay sitio; y abajo, las notas (cuotas repetidas, fechas futuras
+    /// y, filtrando por la cuota de autónomos, lo de tus cuotas).
     fn dibujar_lista(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx, vis: &[usize]) {
         let nota = self.nota(ctx);
-        let alto_nota = if nota.is_empty() { 0 } else { 1 };
-        let [zk, zf, zc, zn] = Layout::vertical([Constraint::Length(5), Constraint::Length(1), Constraint::Min(3), Constraint::Length(alto_nota)]).areas(area);
-        self.dibujar_kpis(f, zk, ctx, vis);
-        self.dibujar_filtros(f, zf);
+        // Las líneas que ocupa lo de debajo (como mucho, tres).
+        let largo: usize = nota.iter().map(|(t, _)| t.chars().count() + 3).sum();
+        let alto_nota = if nota.is_empty() { 0 } else { (largo as u16).div_ceil(area.width.max(1)).clamp(1, 3) };
+        let [a_fil, resto, a_nota] = Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(alto_nota)]).areas(area);
+        self.dibujar_filtros(f, a_fil, ctx, vis.len());
+        let resto = if area.height >= 16 {
+            let [a_res, _, resto] = Layout::vertical([Constraint::Length(4), Constraint::Length(1), Constraint::Min(1)]).areas(resto);
+            self.dibujar_resumen(f, a_res, ctx, vis);
+            resto
+        } else {
+            resto
+        };
         if self.ficha_al_lado() {
-            let [zt, zd] = Layout::horizontal([Constraint::Min(40), Constraint::Length(40)]).areas(zc);
-            self.dibujar_tabla(f, zt, ctx, vis);
+            // Algo más ancha que la de Facturas: las cifras de la ficha van con puntos guía.
+            let w_panel = ((u32::from(area.width) * 38 / 100) as u16).clamp(44, 56);
+            let [a_l, _, a_p] = Layout::horizontal([Constraint::Min(40), Constraint::Length(4), Constraint::Length(w_panel)]).areas(resto);
+            self.dibujar_tabla(f, a_l, ctx, vis);
             let t = match vis.get(self.sel) {
-                Some(&i) => lineas_ficha(&ctx.datos.gastos[i], ctx, zd.width.saturating_sub(2)),
+                Some(&i) => lineas_ficha(&ctx.datos.gastos[i], ctx, a_p.width),
                 None => vec![Line::styled("Elige un gasto para ver su desglose.", tema::apagado())],
             };
-            f.render_widget(Paragraph::new(t).wrap(Wrap { trim: false }).block(bloque("Detalle")), zd);
+            f.render_widget(Paragraph::new(t).wrap(Wrap { trim: false }), a_p);
         } else {
-            self.dibujar_tabla(f, zc, ctx, vis);
+            self.dibujar_tabla(f, resto, ctx, vis);
         }
         if !nota.is_empty() {
-            f.render_widget(Paragraph::new(Line::styled(format!(" {nota}"), tema::apagado())), zn);
+            let mut l = Vec::new();
+            for (i, (t, st)) in nota.into_iter().enumerate() {
+                if i > 0 {
+                    l.push(Span::styled(" · ", tema::apagado()));
+                }
+                l.push(Span::styled(t, st));
+            }
+            f.render_widget(Paragraph::new(Line::from(l)).wrap(Wrap { trim: true }), a_nota);
         }
     }
 }
@@ -724,12 +909,25 @@ impl Pantalla for Gastos {
         if matches!(self.modo, Modo::Ficha) {
             match vis.get(self.sel) {
                 Some(&i) => {
-                    let g = &ctx.datos.gastos[i];
-                    let titulo = format!("{} · {}", fmt::fecha_corta(&g.fecha), nombre(g));
-                    let t = lineas_ficha(g, ctx, area.width.saturating_sub(2));
+                    // La ficha, sin caja: su primera línea ya dice de quién es.
+                    let dentro = Rect { width: area.width.min(ANCHO_HOJA), ..area };
+                    let t = lineas_ficha(&ctx.datos.gastos[i], ctx, dentro.width);
                     self.desplaza = self.desplaza.min(t.len().saturating_sub(1) as u16);
-                    let p = Paragraph::new(t).wrap(Wrap { trim: false }).scroll((self.desplaza, 0)).block(bloque(&titulo));
-                    f.render_widget(p, area);
+                    let filas: u16 = t.iter().map(|l| filas_partidas(&l.spans.iter().map(|s| s.content.as_ref()).collect::<String>(), dentro.width as usize)).sum();
+                    f.render_widget(Paragraph::new(t).wrap(Wrap { trim: false }).scroll((self.desplaza, 0)), dentro);
+                    // Si no cabe entera, cómo seguir (abajo no siempre cabe): a su derecha, arriba.
+                    let tecla = if filas > self.desplaza + area.height {
+                        Some(("PgDn", "más"))
+                    } else {
+                        (self.desplaza > 0).then_some(("PgUp", "arriba"))
+                    };
+                    if let Some(k) = tecla {
+                        let l = linea_atajos(&[k]);
+                        let w = l.width() as u16;
+                        if area.width >= dentro.width + 2 + w {
+                            f.render_widget(Paragraph::new(l.right_aligned()), Rect { height: area.height.min(1), ..area });
+                        }
+                    }
                     return;
                 }
                 None => self.modo = Modo::Lista,
@@ -794,7 +992,7 @@ impl Pantalla for Gastos {
             Modo::Categoria(_) => vec![("↑↓", "elegir"), ("Enter", "filtrar"), ("Esc", "cancelar")],
             Modo::Borrar(..) => vec![("Enter/s", "sí"), ("Esc/n", "no")],
             Modo::Ficha if self.cerrado => vec![("Esc", "volver"), ("↑↓", "otro gasto"), ("PgUp PgDn", "desplazar"), ("o", "documento")],
-            Modo::Ficha => vec![("Esc", "volver"), ("↑↓", "otro gasto"), ("PgUp PgDn", "desplazar"), ("e", "editar"), ("D", "duplicar"), ("d", "borrar"), ("o", "documento")],
+            Modo::Ficha => vec![("Esc", "volver"), ("↑↓", "otro gasto"), ("PgUp PgDn", "desplazar"), ("Enter", "editar"), ("D", "duplicar"), ("d", "borrar"), ("o", "documento")],
             Modo::Lista if self.cerrado && !self.buscando => {
                 let mut v = vec![("Enter", "ficha"), ("o", "documento"), ("t", "trimestre"), ("c", "categoría"), ("/", "buscar")];
                 if self.hay_filtros() {
@@ -805,11 +1003,7 @@ impl Pantalla for Gastos {
             Modo::Lista if self.buscando => vec![("Enter", "aceptar"), ("Esc", "quitar la búsqueda"), ("↑↓", "mover")],
             Modo::Lista => {
                 let mut v = vec![("n", "nuevo")];
-                if self.ficha_al_lado() {
-                    v.push(("Enter", "editar"));
-                } else {
-                    v.extend([("Enter", "ficha"), ("e", "editar")]);
-                }
+                v.push(("Enter", if self.ficha_al_lado() { "editar" } else { "ficha" }));
                 v.extend([("d", "borrar"), ("D", "duplicar"), ("o", "documento"), ("t", "trimestre"), ("c", "categoría"), ("/", "buscar")]);
                 if self.hay_filtros() {
                     v.push(("Esc", "sin filtros"));
@@ -817,5 +1011,40 @@ impl Pantalla for Gastos {
                 v
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::prueba::{app_con, cargar, caso, ir, pantalla, teclas};
+    use crate::dominio::fmt::{self, anio_actual};
+    use crate::dominio::{Gasto, Num};
+
+    /// Al estilo C2, como Facturas y sin cajas: los filtros arriba (con su tecla), lo del año con puntos guía, la
+    /// cabecera de las columnas en minúscula y las cifras sin «€»; Enter, la ficha con el desglose en puntos guía; y
+    /// n, el formulario con lo que te deduces debajo. También a 80 columnas.
+    #[test]
+    fn la_lista_la_ficha_y_el_formulario() {
+        let dir = caso("a-de-todo");
+        let mut d = cargar(&dir);
+        d.gastos.push(Gasto { id: "g-hoy".into(), proveedor: "Zeta Software".into(), concepto: "Licencia".into(), categoria: "software".into(), origen: "es".into(), base: Num::de(100.0), iva_tipo: Num::de(21.0), fecha: fmt::hoy(), ..Default::default() });
+        let mut a = app_con(d, &dir);
+        ir(&mut a, "Gastos");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("t  Año   1T   2T   3T   4T") && p.contains(&format!("pagado en {} ··", anio_actual())), "{p}");
+        assert!(p.contains("IVA deducible ··") && p.contains("con documento ··") && !p.contains('│') && !p.contains('┌'), "{p}");
+        let cabecera = p.lines().find(|l| l.contains("proveedor")).unwrap_or_default();
+        assert!(cabecera.contains("fecha") && cabecera.contains("IVA deduc.") && cabecera.contains("gasto IRPF"), "{p}");
+        let fila = p.lines().find(|l| l.contains("Zeta Software")).unwrap_or_default();
+        assert!(fila.contains(" 100,00 ") && fila.contains(" 21,00 ") && !fila.contains('€'), "{p}");
+        // A 120 columnas la ficha no cabe al lado: Enter la abre.
+        teclas(&mut a, "/Zeta<enter><enter>");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("Zeta Software") && p.contains("pagado ··") && p.contains(" 121,00 €") && p.contains("IVA deducible 100 % ··"), "{p}");
+        assert!(!p.contains('│') && !p.contains('┌'), "{p}");
+        teclas(&mut a, "<esc><esc>n");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("Nuevo gasto") && p.contains("› Fecha") && p.contains("lo que te deduces") && !p.contains('│'), "{p}");
+        assert!(pantalla(&mut a, 80, 24).contains("lo que te deduces"));
     }
 }

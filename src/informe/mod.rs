@@ -4,6 +4,7 @@ pub mod autonomo;
 pub mod calculadora;
 pub mod empleo;
 pub mod inicio;
+pub mod inversiones;
 pub mod prevision;
 pub mod reparto;
 

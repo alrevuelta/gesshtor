@@ -1,11 +1,11 @@
 //! El editor de un borrador: los datos (cliente, operación, fechas, retención…),
 //! las líneas y los totales, que se recalculan al momento. No guarda nada: se lo pide a la pantalla de Facturas.
 use super::clientes::{formulario_cliente, leer_cliente, opciones_operacion, validar_nif};
-use super::facturas::{avisos, cant, fila, linea_vacia};
+use super::facturas::{avisos, cant, linea_vacia, totales};
 use crate::dominio::factura::{self, totales_factura, OPERACIONES};
 use crate::dominio::fmt::{self, dmy, eur, pct};
 use crate::dominio::{uid, Cliente, Datos, Factura, Linea, Num};
-use crate::tui::widgets::{bloque, derecha, normalizar, tema, Eleccion, Entrada, Formulario, Resultado, Selector};
+use crate::tui::widgets::{derecha, normalizar, tema, Eleccion, Entrada, Formulario, Resultado, Selector};
 use crate::tui::Ctx;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -25,7 +25,7 @@ enum Zona {
 enum Sub {
     /// Elegir el cliente.
     Clientes(Selector),
-    /// Los datos de un cliente; `true` si además se guarda en Clientes.
+    /// Los datos de un cliente; `true` si además se guarda en tus clientes.
     Cliente(Formulario, bool),
     /// Una línea y su posición (None: nueva).
     Linea(Formulario, Option<usize>),
@@ -53,6 +53,11 @@ pub struct Editor {
     /// Cómo estaba al abrirla, para saber si hay cambios sin guardar.
     orig: String,
 }
+
+/// Lo más ancho del editor (los datos, las líneas y los totales): más, se lee peor.
+const ANCHO_EDITOR: u16 = 84;
+/// Ancho de los totales (con puntos guía), a la derecha bajo las líneas.
+const ANCHO_TOTALES: u16 = 44;
 
 /* Claves especiales del selector de clientes. */
 const NUEVO: &str = "__nuevo";
@@ -277,7 +282,7 @@ impl Editor {
             v.push((clave, c.nombre.clone(), det.join(" · ")));
         }
         let tiene = !self.f.cliente.nombre.trim().is_empty();
-        v.push((NUEVO.into(), "+ Crear un cliente nuevo…".into(), "se guarda en Clientes".into()));
+        v.push((NUEVO.into(), "+ Crear un cliente nuevo…".into(), "se guarda en tus clientes".into()));
         v.push((MANO.into(), if tiene { "Cambiar los datos del cliente en esta factura…" } else { "Escribir los datos a mano…" }.into(), "solo en esta factura".into()));
         v.push((NADIE.into(), "Sin datos del cliente".into(), "particular: factura simplificada".into()));
         self.sub = Some(Sub::Clientes(Selector::new("¿Para quién es la factura?", v).con_elegido(&actual)));
@@ -351,7 +356,7 @@ impl Editor {
                     if *guardar {
                         ctx.datos.clientes.push(c.clone());
                         if ctx.guardar() {
-                            ctx.ok(format!("Cliente «{}» guardado en Clientes", c.nombre));
+                            ctx.ok(format!("Cliente «{}» guardado en tus clientes", c.nombre));
                         }
                     }
                     self.poner_cliente(&c, &ctx.datos);
@@ -465,118 +470,130 @@ impl Editor {
         }
     }
 
+    /// El editor, sin cajas: arriba, qué borrador es; los datos, como formulario (el campo activo, en el color de
+    /// la sección); las líneas, en una tabla; los totales, con puntos guía y las cifras acabando donde los importes
+    /// de las líneas; y los avisos. Con poca altura, las líneas justas y los totales en una fila.
     pub fn dibujar(&mut self, fr: &mut Frame, area: Rect, ctx: &Ctx) {
+        // Las ventanas, en todo el sitio; lo demás, no más ancho de lo que se lee bien.
+        let todo = area;
+        let area = Rect { width: area.width.min(ANCHO_EDITOR), ..area };
         let d = &ctx.datos;
-        let t = totales_factura(&self.f);
         let av = avisos(d, &self.f);
         let nacional = self.f.operacion == "nacional";
         let est_aviso = |grave: bool| Style::new().fg(if grave { tema::MAL } else { tema::AVISO });
-        if area.width >= 100 {
-            let [izq, der] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-            let ancho = izq.width.saturating_sub(4);
-            let mut tot = vec![fila("Base imponible", eur(t.base), ancho, Style::new(), Style::new())];
-            if nacional {
-                for g in &t.desglose {
-                    tot.push(fila(format!("IVA {}", pct(g.tipo)), eur(g.cuota), ancho, Style::new(), Style::new()));
-                }
-            } else {
-                tot.push(fila("IVA", eur(0.0), ancho, Style::new(), Style::new()));
-            }
-            if t.retencion != 0.0 {
-                tot.push(fila(format!("Retención IRPF {}", pct(self.f.retencion.v())), format!("−{}", eur(t.retencion)), ancho, Style::new(), Style::new()));
-            }
-            let negrita = Style::new().add_modifier(Modifier::BOLD);
-            tot.push(fila("Total a cobrar", eur(t.total), ancho, negrita, negrita));
-            // A la izquierda los datos, los totales y los avisos; a la derecha, las líneas.
-            let alto_form = self.form.alto() + 2;
-            let [a_f, a_t, a_a] = Layout::vertical([Constraint::Length(alto_form), Constraint::Length(tot.len() as u16 + 2), Constraint::Min(0)]).areas(izq);
+        let tot = totales(&self.f, ANCHO_TOTALES);
+        // Los campos y, debajo, tres filas para el error y la ayuda.
+        let alto_form = self.form.campos.len() as u16 + 3;
+        let n = self.f.lineas.len().max(1) as u16;
+        // Con todo a la vista: título, aire, datos, aire, líneas (su título y la cabecera), aire, totales y aire.
+        let fijo = 1 + 1 + alto_form + 1 + 2 + 1 + tot.len() as u16 + 1;
+        let titulo = Paragraph::new(Line::styled(self.titulo.clone(), tema::titulo()));
+        if area.height >= fijo + n.min(3) + av.len().min(1) as u16 {
+            let filas = (area.height - fijo - av.len().min(2) as u16).clamp(1, n);
+            let [a_t, _, a_f, _, a_l, _, a_tot, _, a_a] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(alto_form),
+                Constraint::Length(1),
+                Constraint::Length(2 + filas),
+                Constraint::Length(1),
+                Constraint::Length(tot.len() as u16),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            fr.render_widget(titulo, a_t);
             self.dibujar_form(fr, a_f);
-            self.dibujar_lineas(fr, der, nacional);
-            let b = bloque("Totales");
-            let dentro = b.inner(a_t);
-            fr.render_widget(b, a_t);
-            fr.render_widget(Paragraph::new(tot), dentro.inner(ratatui::layout::Margin::new(1, 0)));
-            let lineas: Vec<Line> = av.iter().map(|(g, m)| Line::styled(format!(" ! {m}"), est_aviso(*g))).collect();
+            // La tabla, dos columnas más estrecha que los totales: el último dígito de los importes cae donde el de
+            // los totales (y su « €» queda fuera, como en la tabla).
+            self.dibujar_lineas(fr, Rect { width: a_l.width.saturating_sub(2), ..a_l }, nacional);
+            let w = ANCHO_TOTALES.min(a_tot.width);
+            fr.render_widget(Paragraph::new(tot), Rect { x: a_tot.right() - w, width: w, ..a_tot });
+            let lineas: Vec<Line> = av.iter().map(|(g, m)| Line::styled(format!("! {m}"), est_aviso(*g))).collect();
             fr.render_widget(Paragraph::new(lineas).wrap(Wrap { trim: true }), a_a);
         } else {
-            let alto_l = (self.f.lineas.len().clamp(1, 4) + 3) as u16;
-            let [a_f, a_l, a_t, a_a] =
-                Layout::vertical([Constraint::Min(5), Constraint::Length(alto_l), Constraint::Length(1), Constraint::Length(if av.is_empty() { 0 } else { 1 })]).areas(area);
+            // Los datos, si caben enteros (si no, se desplazan); y las líneas, en lo que quede (al menos una).
+            let alto_a = if av.is_empty() { 0 } else { 1 };
+            let alto_f = alto_form.min(area.height.saturating_sub(1 + 3 + 1 + alto_a)).max(4);
+            let [a_t, a_f, a_l, a_tot, a_a] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(alto_f),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(alto_a),
+            ])
+            .areas(area);
+            fr.render_widget(titulo, a_t);
             self.dibujar_form(fr, a_f);
             self.dibujar_lineas(fr, a_l, nacional);
-            let mut s = vec![Span::styled(format!(" Base {}", eur(t.base)), tema::apagado()), Span::styled(format!(" · IVA {}", eur(t.cuota)), tema::apagado())];
+            // Los totales en una fila: base, IVA, retención y, en negrita, el total.
+            let t = totales_factura(&self.f);
+            let gris = tema::apagado();
+            let mut s = vec![Span::styled("base ", gris), Span::raw(eur(t.base)), Span::styled(" · IVA ", gris), Span::raw(eur(t.cuota))];
             if t.retencion != 0.0 {
-                s.push(Span::styled(format!(" · Ret. −{}", eur(t.retencion)), tema::apagado()));
+                s.extend([Span::styled(" · retención ", gris), Span::raw(format!("−{}", eur(t.retencion)))]);
             }
-            s.push(Span::styled(format!(" · Total {}", eur(t.total)), Style::new().add_modifier(Modifier::BOLD)));
-            fr.render_widget(Paragraph::new(Line::from(s)), a_t);
+            s.extend([Span::styled(" · total ", gris), Span::styled(eur(t.total), Style::new().add_modifier(Modifier::BOLD))]);
+            fr.render_widget(Paragraph::new(Line::from(s)), a_tot);
             if let Some((g, m)) = av.first() {
                 let mas = if av.len() > 1 { format!(" (+{} avisos)", av.len() - 1) } else { String::new() };
-                fr.render_widget(Paragraph::new(Line::styled(format!(" ! {m}{mas}"), est_aviso(*g))), a_a);
+                fr.render_widget(Paragraph::new(Line::styled(format!("! {m}{mas}"), est_aviso(*g))), a_a);
             }
         }
         match &mut self.sub {
-            Some(Sub::Clientes(s)) => s.dibujar(fr, area),
-            Some(Sub::Cliente(fm, _)) => fm.dibujar_ventana(fr, area, 84),
-            Some(Sub::Linea(fm, _)) => fm.dibujar_ventana(fr, area, 64),
+            Some(Sub::Clientes(s)) => s.dibujar(fr, todo),
+            Some(Sub::Cliente(fm, _)) => fm.dibujar_ventana(fr, todo, 84),
+            Some(Sub::Linea(fm, _)) => fm.dibujar_ventana(fr, todo, 64),
             None => {}
         }
     }
 
+    /// Los datos de la factura, sin recuadro. Sin el foco (en las líneas, o con una ventana encima), sin cursor ni
+    /// ayuda.
     fn dibujar_form(&self, fr: &mut Frame, area: Rect) {
-        let activo = self.zona == Zona::Datos && self.sub.is_none();
-        let mut b = bloque(&self.titulo);
-        if activo {
-            b = b.border_style(Style::new().fg(tema::ACENTO));
-        }
-        let dentro = b.inner(area);
-        fr.render_widget(b, area);
-        if activo {
-            self.form.dibujar(fr, dentro);
+        if self.zona == Zona::Datos && self.sub.is_none() {
+            self.form.dibujar(fr, area);
         } else {
-            // Sin foco: que no se vea el cursor ni la ayuda.
             let mut c = self.form.clone();
             c.foco = c.campos.len();
-            c.dibujar(fr, dentro);
+            c.dibujar(fr, area);
         }
     }
 
+    /// Las líneas: su título («líneas (2)», del color de la sección si las teclas van ahí), la cabecera en gris y
+    /// una fila por línea, con las cifras a la derecha y la elegida en el fondo suave de la sección.
     fn dibujar_lineas(&mut self, fr: &mut Frame, area: Rect, nacional: bool) {
         let activo = self.zona == Zona::Lineas && self.sub.is_none();
-        let titulo = format!("Líneas ({})", self.f.lineas.len());
-        let mut b = bloque(&titulo);
-        if activo {
-            b = b.border_style(Style::new().fg(tema::ACENTO));
-        }
-        let dentro = b.inner(area);
-        fr.render_widget(b, area);
+        let titulo = format!("líneas ({})", self.f.lineas.len());
+        let [a_t, dentro] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        fr.render_widget(Paragraph::new(Line::styled(titulo, if activo { tema::titulo() } else { tema::apagado() })), a_t);
         if self.f.lineas.is_empty() {
-            let txt = if activo { " Sin líneas: pulsa n para añadir una." } else { " Sin líneas: Tab y n para añadir una." };
+            let txt = if activo { "Sin líneas: pulsa n para añadir una." } else { "Sin líneas: Tab y n para añadir una." };
             fr.render_widget(Paragraph::new(Line::styled(txt, tema::apagado())), dentro);
             return;
         }
         let mut anchos = vec![Constraint::Fill(1), Constraint::Length(7), Constraint::Length(12)];
-        let mut cab = vec![Cell::from("Concepto"), Cell::from(derecha("Cant.")), Cell::from(derecha("Precio"))];
+        let mut cab = vec![Cell::from("concepto"), Cell::from(derecha("cant.")), Cell::from(derecha("precio"))];
         if nacional {
             anchos.push(Constraint::Length(5));
             cab.push(Cell::from(derecha("IVA")));
         }
         anchos.push(Constraint::Length(12));
-        cab.push(Cell::from(derecha("Importe")));
+        cab.push(Cell::from(derecha("importe")));
         let filas: Vec<Row> = self
             .f
             .lineas
             .iter()
             .map(|l| {
-                let mut v = vec![Cell::from(l.concepto.clone()), Cell::from(derecha(cant(l.cantidad.v()))), Cell::from(derecha(if l.precio.vacio() { "—".into() } else { eur(l.precio.v()) }))];
+                let mut v = vec![Cell::from(l.concepto.clone()), Cell::from(derecha(cant(l.cantidad.v()))), Cell::from(derecha(if l.precio.vacio() { "—".into() } else { fmt::num(l.precio.v()) }))];
                 if nacional {
                     v.push(Cell::from(derecha(pct(l.iva.v()))));
                 }
-                v.push(Cell::from(derecha(eur(fmt::r2(l.cantidad.v() * l.precio.v())))));
+                v.push(Cell::from(derecha(fmt::num(fmt::r2(l.cantidad.v() * l.precio.v())))));
                 Row::new(v)
             })
             .collect();
-        let tabla = Table::new(filas, anchos).header(Row::new(cab).style(tema::cabecera_tabla())).column_spacing(1).row_highlight_style(tema::seleccion());
+        let tabla = Table::new(filas, anchos).header(Row::new(cab).style(tema::cabecera_tabla())).column_spacing(2).row_highlight_style(tema::seleccion());
         self.linea = self.linea.min(self.f.lineas.len() - 1);
         self.tabla.select(if activo { Some(self.linea) } else { None });
         fr.render_stateful_widget(tabla, dentro, &mut self.tabla);

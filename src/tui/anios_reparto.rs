@@ -2,8 +2,9 @@
 //! generó a lo que te quedó, con lo que se fue en cada paso y de dónde sale (las casillas de tu modelo 100, la
 //! Seguridad Social, tus 303…); la Seguridad Social de tu nómina, por conceptos; todo junto; y tu IRPF: lo que te
 //! tocó y cómo lo pagaste; en el año en curso, lo que saldría en tu Renta. Arriba, los avisos (cifras aproximadas,
-//! declaración conjunta…). Las cifras salen de `informe::reparto`, `informe::anio` e `informe::prevision`; aquí solo
-//! se pintan.
+//! declaración conjunta…). Los títulos de bloque, en gris y en minúscula; la Seguridad Social en azul y el IRPF en
+//! AVISO, como en el resto. Las cifras salen de `informe::reparto`, `informe::anio` e `informe::prevision`; aquí
+//! solo se pintan.
 use super::anios::vinetas;
 use super::empleo::pct1;
 use crate::dominio::fmt::{eur, r2, DIF};
@@ -11,12 +12,14 @@ use crate::informe::anio::{self, Concepto, Detalle};
 use crate::informe::prevision::Prevision;
 use crate::informe::reparto::{Fuente, Reparto, ACTIVIDAD, AHORRO, SUELDO};
 use crate::tui::texto::envolver;
-use crate::tui::widgets::tema;
+use crate::tui::widgets::{tema, titulo_bloque};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Ancho de la columna de importes.
 const COL: usize = 13;
+/// Hasta dónde llegan los pasos de un año (sus importes acaban ahí), para que no queden lejos de sus etiquetas.
+const ANCHO_PASOS: usize = 60;
 
 fn gris() -> Style {
     tema::apagado()
@@ -27,15 +30,20 @@ fn negrita() -> Style {
 }
 
 fn ss() -> Style {
-    Style::new().fg(tema::AVISO)
+    Style::new().fg(tema::AZUL)
 }
 
 fn irpf() -> Style {
-    Style::new().fg(tema::MAL)
+    Style::new().fg(tema::AVISO)
 }
 
 fn queda(x: f64) -> Style {
-    negrita().fg(if x < -DIF { tema::MAL } else { tema::BIEN })
+    negrita().fg(if x < -DIF { tema::AVISO } else { tema::BIEN })
+}
+
+/// Los pasos de un bloque de este año.
+fn pasos(w: usize) -> Pasos {
+    Pasos::new(w.min(ANCHO_PASOS))
 }
 
 /// «1.234,56 €», «−2.746,00 €»
@@ -124,7 +132,7 @@ fn nota_de(det: &Detalle, c: Concepto) -> Option<String> {
 fn resumen(f: &Fuente, sobre: &str, w: usize) -> Vec<Line<'static>> {
     let que = if f.seguridad_social > DIF { "Impuestos y cotizaciones" } else { "Impuestos" };
     let pct = f.tipo().map(|t| if sobre.is_empty() { format!(" ({})", pct1(t * 100.0)) } else { format!(" ({} {sobre})", pct1(t * 100.0)) }).unwrap_or_default();
-    envolver(&[(format!("{que}: {}{pct}", eur(f.impuestos())), negrita())], w, 0)
+    envolver(&[(format!("{que}: {}{pct}", eur(f.impuestos())), Style::new())], w, 0)
 }
 
 /// La etiqueta del IRPF de una fuente (con Renta).
@@ -145,7 +153,7 @@ fn con_total(r: &Reparto) -> bool {
 fn sueldo(f: &Fuente, r: &Reparto, w: usize) -> Vec<Line<'static>> {
     let (bruto, empresa) = r.sueldo.unwrap_or((f.generado, 0.0));
     let con_empresa = empresa > DIF;
-    let mut p = Pasos::new(w);
+    let mut p = pasos(w);
     if con_empresa {
         p.paso("Lo que pagó tu empresa por ti", negrita(), f.generado, "");
         p.paso("  − Seguridad Social que paga tu empresa", ss(), empresa, "−");
@@ -187,7 +195,7 @@ fn sueldo(f: &Fuente, r: &Reparto, w: usize) -> Vec<Line<'static>> {
 fn actividad(f: &Fuente, r: &Reparto, w: usize) -> Vec<Line<'static>> {
     let facturado = r2(f.generado - f.iva);
     let rendimiento = r2(facturado - f.gastos);
-    let mut p = Pasos::new(w);
+    let mut p = pasos(w);
     p.paso("Lo que facturaste (sin IVA)", negrita(), facturado, "");
     if f.gastos > DIF {
         p.paso("  − Gastos de tu actividad", gris(), f.gastos, "−");
@@ -219,7 +227,7 @@ fn actividad(f: &Fuente, r: &Reparto, w: usize) -> Vec<Line<'static>> {
 
 /// Alquileres y ahorro: lo que generó (con su detalle), el IRPF y lo que te queda.
 fn otra(f: &Fuente, r: &Reparto, det: &Detalle, w: usize) -> Vec<Line<'static>> {
-    let mut p = Pasos::new(w);
+    let mut p = pasos(w);
     let con_nota = |p: &mut Pasos, c: Concepto| {
         if let Some(n) = nota_de(det, c) {
             p.nota(n, w);
@@ -267,7 +275,7 @@ fn otra(f: &Fuente, r: &Reparto, det: &Detalle, w: usize) -> Vec<Line<'static>> 
 /// Todo junto, si hay más de una fuente.
 fn total(t: &Fuente, r: &Reparto, w: usize) -> Vec<Line<'static>> {
     let generado = r2(t.generado - t.iva);
-    let mut p = Pasos::new(w);
+    let mut p = pasos(w);
     let empresa = r.sueldo.map_or(0.0, |s| s.1);
     p.paso(if empresa > DIF { "Lo que generaste (con lo de tu empresa)" } else { "Lo que generaste" }, negrita(), generado, "");
     if t.gastos > DIF {
@@ -312,7 +320,7 @@ fn irpf_del_anio(det: &Detalle, w: usize) -> Vec<Line<'static>> {
     if ir.filas.is_empty() && ir.toco.is_empty() {
         return Vec::new();
     }
-    let mut p = Pasos::new(w);
+    let mut p = pasos(w);
     // Ya se sabe que es el modelo 100: de él, solo las casillas.
     let fuente = |fs: &[anio::Fuente]| {
         fs.iter()
@@ -331,7 +339,7 @@ fn irpf_del_anio(det: &Detalle, w: usize) -> Vec<Line<'static>> {
                 p.nota(x.nota.clone(), w);
             }
         }
-        p.paso("= Tu IRPF del año", negrita().fg(tema::MAL), ir.total, "");
+        p.paso("= Tu IRPF del año", negrita().fg(tema::AVISO), ir.total, "");
         let f = fuente(&ir.fuente);
         if !f.is_empty() {
             p.nota(f, w);
@@ -351,14 +359,14 @@ fn irpf_del_anio(det: &Detalle, w: usize) -> Vec<Line<'static>> {
         }
     }
     if !ir.con_renta {
-        p.paso("= Lo adelantado", negrita().fg(tema::MAL), ir.total, "");
+        p.paso("= Lo adelantado", negrita().fg(tema::AVISO), ir.total, "");
     }
     p.lineas
 }
 
 /// Lo que saldría en la Renta del año en curso (o por qué aún no se sabe).
 fn prevision(p: &Prevision, w: usize) -> Vec<Line<'static>> {
-    let mut l = Pasos::new(w);
+    let mut l = pasos(w);
     match p {
         Prevision::Estimada { resultado: x, supuestos } => {
             let (et, st) = if *x > DIF {
@@ -400,20 +408,20 @@ pub(super) fn lineas(r: &Reparto, det: &Detalle, prev: Option<&Prevision>, w: us
         l.extend(vinetas(avisos, w));
         l.push(Line::from(""));
     }
-    let titulo = |t: &str| Line::styled(t.to_string(), tema::titulo());
+    let titulo = |t: &str| titulo_bloque(t);
     let meses = det.nomina.as_ref().filter(|n| n.con_nomina > 0).map(|n| format!("Seguridad Social, {}", n.texto_meses()));
     for f in &r.fuentes {
         let (t, origen, cuerpo) = match f.nombre {
-            SUELDO => ("Tu sueldo", de_donde(det, &[Concepto::Sueldo], &meses.clone().into_iter().collect::<Vec<_>>(), w), sueldo(f, r, w)),
+            SUELDO => ("tu sueldo", de_donde(det, &[Concepto::Sueldo], &meses.clone().into_iter().collect::<Vec<_>>(), w), sueldo(f, r, w)),
             ACTIVIDAD => {
                 let mut mas: Vec<String> = det.cuota.iter().map(|c| format!("cuota: {}", c.de)).collect();
                 if r.iva.is_some() {
                     mas.push("IVA: tus 303".into());
                 }
-                ("Como autónomo", de_donde(det, &[Concepto::Actividad], &mas, w), actividad(f, r, w))
+                ("como autónomo", de_donde(det, &[Concepto::Actividad], &mas, w), actividad(f, r, w))
             }
-            AHORRO => ("Tu ahorro", de_donde(det, &[Concepto::Capital, Concepto::Ganancias], &[], w), otra(f, r, det, w)),
-            _ => ("Alquileres y otras rentas", de_donde(det, &[Concepto::OtrasRentas], &[], w), otra(f, r, det, w)),
+            AHORRO => ("tu ahorro", de_donde(det, &[Concepto::Capital, Concepto::Ganancias], &[], w), otra(f, r, det, w)),
+            _ => ("alquileres y otras rentas", de_donde(det, &[Concepto::OtrasRentas], &[], w), otra(f, r, det, w)),
         };
         l.push(titulo(t));
         l.extend(origen);
@@ -421,19 +429,19 @@ pub(super) fn lineas(r: &Reparto, det: &Detalle, prev: Option<&Prevision>, w: us
         l.push(Line::from(""));
     }
     if con_total(r) {
-        l.push(titulo("Todo junto"));
+        l.push(titulo("todo junto"));
         l.extend(total(&r.total, r, w));
         l.push(Line::from(""));
     }
     let irpf = irpf_del_anio(det, w);
     if !irpf.is_empty() {
-        l.push(titulo(if r.con_renta { "Tu IRPF, según tu modelo 100" } else { "Tu IRPF adelantado" }));
+        l.push(titulo(if r.con_renta { "tu IRPF, según tu modelo 100" } else { "tu IRPF adelantado" }));
         l.extend(irpf);
         l.push(Line::from(""));
     }
     if let Some(p) = prev {
         let estimada = if matches!(p, Prevision::Estimada { .. }) { ", estimada" } else { "" };
-        l.push(titulo(&format!("Tu Renta de {}{estimada}", r.y)));
+        l.push(titulo(&format!("tu Renta de {}{estimada}", r.y)));
         l.extend(prevision(p, w));
         l.push(Line::from(""));
     }
@@ -449,7 +457,7 @@ fn notas(r: &Reparto) -> Vec<(String, Style)> {
             v.push(("El IRPF de cada fuente es su parte de tu Renta: el del ahorro, el de su escala; el de la base general, repartido entre sueldo, actividad y alquileres según lo que aporta cada uno a ella.".into(), gris()));
         }
         if r.deducciones > DIF {
-            v.push(("Las deducciones de tu Renta (por invertir en empresas nuevas, donativos, vivienda…) rebajan el IRPF de todo, no el de una fuente: por eso van aparte, en «Todo junto», y el IRPF de cada fuente es el de antes de deducciones.".into(), gris()));
+            v.push(("Las deducciones de tu Renta (por invertir en empresas nuevas, donativos, vivienda…) rebajan el IRPF de todo, no el de una fuente: por eso van aparte, en «todo junto», y el IRPF de cada fuente es el de antes de deducciones.".into(), gris()));
         }
     } else {
         v.push((format!("Sin Renta de {}: el IRPF es lo adelantado (lo retenido en tu nómina, tus 130 y lo que te retienen tus clientes), no el del año.", r.y), Style::new().fg(tema::AVISO)));
@@ -508,7 +516,7 @@ mod tests {
         let mut r = con_todo();
         r.fuentes.truncate(1);
         let t = lineas(&r, &det, None, 100).iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect::<Vec<_>>().join("\n");
-        for esperado in ["De dónde sale: modelo 100, casillas 0012 0013", "Tu IRPF, según tu modelo 100", "tipo medio 22,5 %", "= Tu IRPF del año", "casilla 0595", "Cómo lo pagaste:", "casilla 0596"] {
+        for esperado in ["De dónde sale: modelo 100, casillas 0012 0013", "tu IRPF, según tu modelo 100", "tipo medio 22,5 %", "= Tu IRPF del año", "casilla 0595", "Cómo lo pagaste:", "casilla 0596"] {
             assert!(t.contains(esperado), "falta «{esperado}»:\n{t}");
         }
         // Lo que ya dicen las cifras no se repite.
@@ -554,7 +562,7 @@ mod tests {
         // En el año en curso, lo que saldría en la Renta.
         let p = Prevision::Estimada { resultado: -310.0, supuestos: "Calculado para un sueldo así.".into() };
         let todo = lineas(&con_todo(), &Detalle::default(), Some(&p), 100).iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-        assert!(todo.contains("Tu Renta de 2024, estimada") && todo.contains("Calculado para un sueldo"), "{todo}");
+        assert!(todo.contains("tu Renta de 2024, estimada") && todo.contains("Calculado para un sueldo"), "{todo}");
         assert!(todo.lines().any(|l| l.starts_with("  Te saldría a devolver") && l.ends_with("≈310,00 €")), "{todo}");
         // En una terminal estrecha no se sale nada.
         let estrecho = pintado(&con_todo(), 40);

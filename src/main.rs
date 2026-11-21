@@ -1,13 +1,15 @@
 //! gesshtor: tus impuestos en la terminal.
 //!
 //!     gesshtor --certificado RUTA [carpeta] [--sincronizar] [--todo]
+//!     gesshtor json FICHERO.pdf [AAAA_PP_MMM] | gesshtor json tgss [carpeta | --certificado RUTA]
 //!
 //! Sin certificado no se abre: con él (un .p12 / .pfx) se sabe quién eres y se trae lo último de Hacienda y la
 //! Seguridad Social (solo consulta). La carpeta es la de una persona (con datos.json) o una con varias personas en
-//! subcarpetas: se abre la del NIF del certificado.
-use gesshtor::red::certificado::Certificado;
+//! subcarpetas: se abre la del NIF del certificado. `json`, para ver lo que entiende la app.
+use gesshtor::red::certificado::{Certificado, CLAVE_EN_EL_ENTORNO};
 use gesshtor::sincronizar;
 use gesshtor::{dominio::almacen, dominio::Datos, hacienda::lectura, tui};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +23,20 @@ const AYUDA: &str = "Uso: gesshtor --certificado RUTA [carpeta] [--sincronizar] 
                    Por defecto: $PANEL_DATOS o ./mock.
   --sincronizar    Solo trae lo último y lo guarda, sin abrir la app (y dice qué ha traído).
   --todo           Vuelve a consultar todos los años, no solo los dos últimos.
-  -V, --version    La versión y el commit del que sale este ejecutable.";
+  -V, --version    La versión y el commit del que sale este ejecutable.
+
+Uso: gesshtor json FICHERO.pdf [AAAA_PP_MMM] | gesshtor json tgss [carpeta | --certificado RUTA]
+
+  json FICHERO.pdf    Lo que lee la app de un PDF de Hacienda, en JSON: lo mismo que guardaría
+                      en fuentes/. No guarda nada. De qué es lo dice su nombre, como en
+                      justificantes/ (2025_1T_303_CSV.pdf); si se llama de otra forma, dilo
+                      detrás: gesshtor json renta.pdf 2025_0A_100. Si no lo entiende, sale
+                      con el código 2 y escribe aparte el informe del fallo, para copiarlo.
+  json tgss [carpeta] Lo de la Seguridad Social guardado en la carpeta (fuentes/tgss.json), sin
+                      certificado: lo que se trajo la última vez.
+  json tgss --certificado RUTA
+                      Lo trae ahora de la Seguridad Social con tu certificado (tus datos de
+                      autónomo y tus nóminas de los últimos meses) y lo enseña, sin guardarlo.";
 
 struct Opciones {
     dir: PathBuf,
@@ -58,11 +73,13 @@ fn opciones() -> Result<Opciones, String> {
     Ok(o)
 }
 
-/// Abre el certificado: la contraseña de $PANEL_CLAVE_CERTIFICADO o, si no, se pregunta (sin que se vea), hasta
-/// tres veces.
+/// Abre el certificado: la contraseña de $PANEL_CLAVE_CERTIFICADO (que se quita del entorno nada más leerla: así no
+/// la hereda ningún programa que lance la app) o, si no, se pregunta (sin que se vea), hasta tres veces.
 fn abrir_certificado(ruta: &Path) -> Result<Certificado, String> {
-    if let Ok(clave) = std::env::var("PANEL_CLAVE_CERTIFICADO") {
-        return Certificado::abrir(ruta, &clave);
+    if let Some(clave) = std::env::var_os(CLAVE_EN_EL_ENTORNO) {
+        // SAFETY: se llama al empezar, antes de que la app arranque ningún otro hilo.
+        unsafe { std::env::remove_var(CLAVE_EN_EL_ENTORNO) };
+        return Certificado::abrir(ruta, &clave.to_string_lossy());
     }
     let mut ultimo = String::new();
     for _ in 0..3 {
@@ -80,41 +97,73 @@ fn abrir_certificado(ruta: &Path) -> Result<Certificado, String> {
     Err(ultimo)
 }
 
-/// La carpeta de la persona del certificado: la que tenga su NIF; si no hay ninguna, una nueva (en una carpeta
-/// de varias personas) o la carpeta dada si aún no es de nadie.
-fn carpeta_de(dir: &Path, cert: &Certificado) -> Result<PathBuf, String> {
-    let nif_de = |p: &Path| almacen::cargar(p).map(|d| d.perfil.nif.trim().to_uppercase()).unwrap_or_default();
-    let perfiles = almacen::perfiles(dir);
-    if let Some(p) = perfiles.iter().find(|p| nif_de(p) == cert.nif) {
-        return Ok(p.clone());
-    }
-    if almacen::ruta_datos(dir).is_file() {
-        return match nif_de(dir) {
-            n if n.is_empty() => Ok(dir.to_path_buf()),
-            _ => Err(format!("{} es de otra persona (otro NIF). Usa la carpeta de esta persona, o una carpeta nueva.", dir.display())),
-        };
-    }
-    // Persona nueva: su carpeta, con su nombre.
-    let nombre: String = cert.nombre_completo().to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
-    let nueva = dir.join(nombre.trim_matches('-'));
-    std::fs::create_dir_all(&nueva).map_err(|e| format!("No se puede crear {}: {e}", nueva.display()))?;
-    let mut d = Datos::default();
-    sincronizar::perfil_desde(&mut d, cert);
-    almacen::guardar(&nueva, &d, &mut false).map_err(|e| format!("No se puede crear {}: {e}", nueva.display()))?;
-    eprintln!("Carpeta nueva para {}: {}", cert.nombre_completo(), nueva.display());
-    Ok(nueva)
-}
-
 fn salir_con(e: &str) -> ! {
     eprintln!("{e}");
     std::process::exit(1);
 }
 
+/// `gesshtor json …`: el JSON de lo que lee la app de un PDF (sin guardarlo) o el de la Seguridad Social (el guardado
+/// o, con el certificado, el de ahora), para ver qué entiende. Sin certificado no sale a la red. ¿Ha salido bien? (un
+/// PDF que no se entiende, no)
+fn json(args: &[String]) -> Result<bool, String> {
+    let mut salida = std::io::stdout();
+    match args {
+        [t, c, ruta] if t == "tgss" && c == "--certificado" => {
+            let cert = abrir_certificado(Path::new(ruta))?;
+            let nombres = [cert.nombre_completo(), cert.saludo()];
+            let nombres: Vec<&str> = nombres.iter().map(String::as_str).collect();
+            let informe = |e: gesshtor::dominio::fallo::Error| gesshtor::dominio::fallo::informes([&e], &nombres);
+            eprintln!("Trayendo lo de la Seguridad Social con el certificado de {}…", cert.saludo());
+            let ss = gesshtor::tgss::SeguridadSocial::entrar(&cert).map_err(informe)?;
+            let mut t = ss.autonomo().map_err(informe)?;
+            let meses = gesshtor::tgss::meses_a_consultar(&Datos::default(), &gesshtor::tgss::ahora());
+            let (m, _) = ss.nominas(&meses).map_err(informe)?;
+            t.nomina.meses = m;
+            writeln!(salida, "{}", serde_json::to_string_pretty(&t).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        [t, resto @ ..] if t == "tgss" && resto.len() <= 1 => {
+            let dir = resto.first().map(PathBuf::from).or_else(|| std::env::var_os("PANEL_DATOS").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("mock"));
+            let personas = almacen::perfiles(&dir);
+            let [p] = personas.as_slice() else {
+                let cuales: Vec<String> = personas.iter().map(|p| p.display().to_string()).collect();
+                return Err(match cuales.is_empty() {
+                    true => format!("En {} no hay datos de nadie (datos.json).", dir.display()),
+                    false => format!("En {} hay varias personas; di la carpeta de una: {}", dir.display(), cuales.join(", ")),
+                });
+            };
+            let ruta = almacen::ruta_fuentes(p).join("tgss.json");
+            let txt = std::fs::read_to_string(&ruta).map_err(|_| format!("No hay {}: se crea al traer lo de la Seguridad Social con tu certificado (o al abrir con la app una carpeta de antes).", ruta.display()))?;
+            writeln!(salida, "{}", txt.trim_end()).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        [pdf, como @ ..] if pdf.to_lowercase().ends_with(".pdf") && como.len() <= 1 => {
+            let f = lectura::leer_fichero(Path::new(pdf), como.first().map(String::as_str))?;
+            writeln!(salida, "{}", serde_json::to_string_pretty(&f).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            // Si no se entiende, el informe para copiar, aparte (en la salida de errores), con los nombres de la persona
+            // tapados si el PDF está en su carpeta (en justificantes/).
+            if let Some(e) = &f.error {
+                let carpeta = Path::new(pdf).parent().filter(|p| p.ends_with("justificantes")).and_then(Path::parent);
+                let perfil = carpeta.and_then(|c| almacen::cargar(c).ok()).map(|d| d.perfil).unwrap_or_default();
+                let nombres = [perfil.nombre.as_str(), perfil.nombre_pila.as_str(), perfil.apellidos.as_str()];
+                eprintln!("{}", gesshtor::dominio::fallo::informes([e], &nombres));
+            }
+            Ok(f.error.is_none())
+        }
+        _ => Err(format!("¿De qué quieres el JSON?\n\n{AYUDA}")),
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "json") {
+        let bien = json(&args[1..]).unwrap_or_else(|e| salir_con(&e));
+        std::process::exit(if bien { 0 } else { 2 });
+    }
     let o = opciones().unwrap_or_else(|e| salir_con(&e));
     let ruta = o.certificado.as_ref().expect("comprobado en opciones()");
     let cert = abrir_certificado(ruta).unwrap_or_else(|e| salir_con(&e));
-    let dir = carpeta_de(&o.dir, &cert).unwrap_or_else(|e| salir_con(&e));
+    let dir = sincronizar::carpeta_de(&o.dir, &cert).unwrap_or_else(|e| salir_con(&e));
     let mut ctx = tui::Ctx::abrir(&dir).unwrap_or_else(|e| salir_con(&format!("No puedo abrir {}: {e}", dir.display())));
     if cert.dias_para_caducar() < 0 {
         eprintln!("Ojo: tu certificado caducó el {}. Hacienda y la Seguridad Social no lo aceptarán.", cert.caduca);
@@ -143,9 +192,9 @@ fn sin_ventana(ctx: &mut tui::Ctx, cert: &Certificado, todo: bool) {
     eprintln!("Trayendo lo último con el certificado de {} (caduca el {})…", cert.saludo(), cert.caduca);
     // Por dónde va, siempre en la misma línea (cortada al ancho de la terminal).
     let ancho = ratatui::crossterm::terminal::size().map_or(100, |(w, _)| usize::from(w)).saturating_sub(3);
-    let r = sincronizar::sincronizar(&ctx.dir, &ctx.datos, cert, todo, &mut |p| eprint!("\r\x1b[2K  {}", p.chars().take(ancho).collect::<String>()));
+    let mut r = sincronizar::sincronizar(&ctx.dir, &ctx.datos, cert, todo, &mut |p| eprint!("\r\x1b[2K  {}", p.chars().take(ancho).collect::<String>()));
     eprintln!();
-    sincronizar::aplicar(&mut ctx.datos, &r);
+    sincronizar::aplicar(&ctx.dir, &mut ctx.datos, &mut r);
     if !ctx.guardar() {
         salir_con("No se ha podido guardar datos.json.");
     }
@@ -157,5 +206,21 @@ fn sin_ventana(ctx: &mut tui::Ctx, cert: &Certificado, todo: bool) {
     }
     if !r.errores.is_empty() {
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// La contraseña de `$PANEL_CLAVE_CERTIFICADO` se quita del entorno de la app nada más usarla (aunque el
+    /// certificado no se abra): así no la hereda ningún programa que lance la app.
+    #[test]
+    fn la_clave_no_se_queda_en_el_entorno() {
+        const CLAVE: &str = gesshtor::red::certificado::CLAVE_EN_EL_ENTORNO;
+        // SAFETY: es la única prueba de este ejecutable que toca el entorno.
+        unsafe { std::env::set_var(CLAVE, "inventada") };
+        assert!(abrir_certificado(Path::new("no-existe-gesshtor.p12")).is_err());
+        assert!(std::env::var_os(CLAVE).is_none());
     }
 }

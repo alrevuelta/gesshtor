@@ -481,7 +481,6 @@ mod tests {
         assert_eq!(por_tramos(e, -5.0), 0.0);
     }
 
-    // Las cifras, comprobadas con la web de la que salió la app.
     #[test]
     fn cuota_de_un_sueldo() {
         // 30.000 € en Madrid, 2025: sin reducción (pasa de 19.747,50 €) ni deducción.

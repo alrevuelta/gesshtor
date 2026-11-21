@@ -11,14 +11,14 @@ use crate::hacienda::{irpf, modelo_130, Modelo, Trimestral};
 use crate::dominio::fmt::{self, r2};
 use crate::hacienda::{self, Plazo};
 use crate::informe::autonomo::{self, ActividadAnio, Fuente};
-use crate::tui::texto::compacto;
-use crate::tui::widgets::{bloque, derecha, kpi, tema};
+use crate::tui::texto::{compacto, envolver};
+use crate::tui::widgets::{derecha, filas_partidas, guia, tema, titulo_bloque};
 use crate::tui::Ctx;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Bar, BarChart, BarGroup, Cell, Paragraph, Row, Table, Wrap};
 use crate::dominio::Valor;
 
 #[derive(Default)]
@@ -102,6 +102,23 @@ struct Trim {
     exento: bool,
     e303: Estado,
     e130: Estado,
+    /// Lo presentado frente a tus datos: los modelos que no cuadran y si alguno se pudo comparar con tus datos.
+    no_cuadran: Vec<&'static str>,
+    comparado: bool,
+}
+
+/// Qué modelos presentados de un trimestre no cuadran con tus datos, y si alguno se pudo comparar con ellos.
+fn cuadres(d: &Datos, anio: i32, q: u32, memo: &mut Memo) -> (Vec<&'static str>, bool) {
+    let (mut no, mut comparado) = (Vec::new(), false);
+    for m in Trimestral::TODOS {
+        if let Some(c) = autonomo::cuadre(d, m, anio, q, memo) {
+            comparado |= c.con_datos;
+            if !c.cuadra() {
+                no.push(m.modelo().codigo());
+            }
+        }
+    }
+    (no, comparado)
 }
 
 /// Todo lo que enseña el resumen de un año.
@@ -168,7 +185,10 @@ fn cifras(d: &Datos, anio: i32, hoy: &str, memo: &mut Memo) -> Cifras {
             pagado += r130.max(0.0);
         }
         let meses = (q as usize - 1) * 3..q as usize * 3;
+        let (no_cuadran, comparado) = cuadres(d, anio, q, memo);
         trims.push(Trim {
+            no_cuadran,
+            comparado,
             ingresos: Some(r2(ing[meses.clone()].iter().sum())),
             gastos: Some(r2(gas[meses].iter().sum())),
             r303: Some(r303),
@@ -230,8 +250,11 @@ fn de_renta(d: &Datos, a: ActividadAnio, hoy: &str) -> DeRenta {
         let r130 = p130[i].as_ref().map(|c| Trimestral::M130.resultado_de(c));
         iva += r303.unwrap_or(0.0).max(0.0);
         irpf += r130.unwrap_or(0.0).max(0.0);
+        let (no_cuadran, comparado) = cuadres(d, anio, q, &mut Memo::default());
         sin_casillas += usize::from(matches!(e303, Estado::Presentado(_)) && r303.is_none()) + usize::from(matches!(e130, Estado::Presentado(_)) && r130.is_none());
         trims.push(Trim {
+            no_cuadran,
+            comparado,
             ingresos,
             gastos: delta(2),
             r303,
@@ -273,7 +296,7 @@ fn avisos(d: &Datos, hoy: &str, memo: &mut Memo) -> Vec<Aviso> {
     let mut pend: Vec<_> = trimestre::pendientes(d, hoy, y - 1, memo).into_iter().filter(|p| p.plazo.q == 4).collect();
     pend.extend(trimestre::pendientes(d, hoy, y, memo));
     for p in pend.iter().filter(|p| p.abierto || p.vencido) {
-        let (q, a, fin) = (p.plazo.q, p.plazo.anio, fmt::dmy(&p.plazo.fin));
+        let (q, a, fin) = (p.plazo.q, p.plazo.anio, fmt::fecha_corta(&p.plazo.fin));
         if p.vencido {
             aviso(Urgencia::Alta, format!("El {q}T de {a} ({}) se pasó de plazo el {fin}.", p.modelos()));
         } else {
@@ -286,9 +309,9 @@ fn avisos(d: &Datos, hoy: &str, memo: &mut Memo) -> Vec<Aviso> {
     match trimestre::estado_renta(d, hoy, y - 1) {
         (Estado::EnPlazo(n), _, fin) => {
             let urg = if n <= 14 { Urgencia::Media } else { Urgencia::Normal };
-            aviso(urg, format!("Toca la Renta de {}: hasta el {}, {}.", y - 1, fmt::dmy(&fin), trimestre::dias_txt(n)));
+            aviso(urg, format!("Toca la Renta de {}: hasta el {}, {}.", y - 1, fmt::fecha_corta(&fin), trimestre::dias_txt(n)));
         }
-        (Estado::Vencido, _, fin) => aviso(Urgencia::Alta, format!("La Renta de {} se pasó de plazo el {}.", y - 1, fmt::dmy(&fin))),
+        (Estado::Vencido, _, fin) => aviso(Urgencia::Alta, format!("La Renta de {} se pasó de plazo el {}.", y - 1, fmt::fecha_corta(&fin))),
         _ => {}
     }
 
@@ -297,7 +320,7 @@ fn avisos(d: &Datos, hoy: &str, memo: &mut Memo) -> Vec<Aviso> {
     for f in vencidas.iter().take(3) {
         let cliente = if f.cliente.nombre.is_empty() { "sin cliente" } else { f.cliente.nombre.as_str() };
         let total = factura::totales_factura(f).total;
-        aviso(Urgencia::Media, format!("La factura {} ({cliente}) venció el {} sin cobrar: {}.", f.numero, fmt::dmy(&f.vencimiento), fmt::eur(total)));
+        aviso(Urgencia::Media, format!("La factura {} ({cliente}) venció el {} sin cobrar: {}.", f.numero, fmt::fecha_corta(&f.vencimiento), fmt::eur(total)));
     }
     if vencidas.len() > 3 {
         let resto = &vencidas[3..];
@@ -328,11 +351,11 @@ fn proximo(hoy: &str) -> Option<String> {
 
 /* ================= dibujo ================= */
 
-/// Una cifra de arriba: (prioridad, etiqueta, etiqueta corta, valor, nota, estilo). Con poco ancho se quedan las
-/// de prioridad más baja.
-type Kpi = (usize, &'static str, &'static str, String, String, Style);
+/// Una cifra de arriba: (etiqueta, etiqueta corta, valor, nota, estilo). Van en dos columnas de tres: las tres
+/// primeras a la izquierda.
+type Kpi = (&'static str, &'static str, String, String, Style);
 
-fn kpis_app(c: &Cifras, e: &dyn Fn(f64) -> String) -> Vec<Kpi> {
+fn kpis_app(c: &Cifras) -> Vec<Kpi> {
     let nota_gastos = if c.gdj > DIF {
         // El 5 % de difícil justificación: aquí ya restado, o solo en la Renta.
         if c.con5 { format!("con 5 %: {}", fmt::eur0(c.gdj)) } else { format!("+{} en Renta", fmt::eur0(c.gdj)) }
@@ -347,54 +370,81 @@ fn kpis_app(c: &Cifras, e: &dyn Fn(f64) -> String) -> Vec<Kpi> {
         "nada pendiente".into()
     };
     let normal = Style::new();
+    let e = fmt::eur;
     vec![
-        (0, "Facturado sin IVA", "Facturado", e(c.facturado), format!("{} factura{}", c.n_facturas, if c.n_facturas == 1 { "" } else { "s" }), normal),
-        (4, "IVA repercutido", "IVA cobrado", e(c.iva), "en tus facturas".to_string(), normal),
-        (1, "Gastos deducibles", "Gastos", e(c.gastos), nota_gastos, normal),
-        (2, "Rendimiento neto", "Rendimiento", e(c.rn), "ingresos − gastos".into(), Style::new().fg(tema::ACENTO)),
-        (5, "Retenciones", "Retenciones", e(c.retenciones), "a cuenta del IRPF".into(), normal),
-        (3, "Pendiente Hacienda", "Pendiente", e(c.reserva), pendiente, if c.reserva > DIF { Style::new().fg(tema::AVISO) } else { Style::new().fg(tema::BIEN) }),
+        ("facturado sin IVA", "facturado", e(c.facturado), format!("{} factura{}", c.n_facturas, if c.n_facturas == 1 { "" } else { "s" }), normal),
+        ("gastos deducibles", "gastos", e(c.gastos), nota_gastos, normal),
+        ("rendimiento neto", "rendimiento", e(c.rn), "ingresos − gastos".into(), Style::new().fg(tema::acento())),
+        ("IVA repercutido", "IVA cobrado", e(c.iva), "en tus facturas".to_string(), normal),
+        ("retenciones", "retenciones", e(c.retenciones), "a cuenta del IRPF".into(), normal),
+        ("pendiente con Hacienda", "pendiente", e(c.reserva), pendiente, if c.reserva > DIF { Style::new().fg(tema::AVISO) } else { Style::new().fg(tema::BIEN) }),
     ]
 }
 
 /// Las de un año cerrado: lo que dice su Renta y lo que pagaste con los 303 y 130.
-fn kpis_renta(r: &DeRenta, e: &dyn Fn(f64) -> String) -> Vec<Kpi> {
+fn kpis_renta(r: &DeRenta) -> Vec<Kpi> {
     let a = &r.a;
     let normal = Style::new();
-    let opt = |x: Option<f64>| x.map(e).unwrap_or_else(|| "—".into());
+    let e = fmt::eur;
     let sin = if a.gdj > DIF { format!("sin cuota ni {}", fmt::pct(irpf::gdj_reglas(a.anio).0)) } else { "sin la cuota".into() };
     let pagado = r2(r.iva + r.irpf);
     vec![
-        (0, "Ingresos", "Ingresos", e(a.ingresos), format!("Renta {}", a.anio), normal),
-        (2, "Gastos deducibles", "Gastos", e(a.gastos), sin, normal),
-        (3, "Cuota de autónomo", "Cuota", e(a.cuota), "casilla 0186".into(), normal),
-        (1, "Rendimiento neto", "Rendimiento", e(a.neto), "casilla 0224".into(), Style::new().fg(tema::ACENTO)),
-        (5, "Retenciones", "Retenciones", opt(a.retenciones), "de tus clientes".into(), normal),
-        (4, "Pagado a Hacienda", "Pagado", e(pagado), "en 303 y 130".into(), normal),
+        ("ingresos", "ingresos", e(a.ingresos), format!("Renta {}", a.anio), normal),
+        ("gastos deducibles", "gastos", e(a.gastos), sin, normal),
+        ("cuota de autónomo", "cuota", e(a.cuota), "casilla 0186".into(), normal),
+        ("rendimiento neto", "rendimiento", e(a.neto), "casilla 0224".into(), Style::new().fg(tema::acento())),
+        ("retenciones", "retenciones", a.retenciones.map(e).unwrap_or_else(|| "—".into()), "de tus clientes".into(), normal),
+        ("pagado a Hacienda", "pagado", e(pagado), "en 303 y 130".into(), normal),
     ]
 }
 
-fn pintar_kpis(f: &mut Frame, area: Rect, vista: &Vista, grande: bool) {
-    let por_columna = if grande { 18 } else { 14 };
-    let n = (area.width / por_columna).clamp(1, 6) as usize;
-    let ancho = area.width as usize / n;
-    let e = |x: f64| if ancho >= 14 { fmt::eur(x) } else { fmt::eur0(x) };
-    let todos = match vista {
-        Vista::App(c) => kpis_app(c, &e),
-        Vista::Renta(r) => kpis_renta(r, &e),
-    };
-    let elegidos: Vec<_> = todos.iter().filter(|k| k.0 < n).collect();
-    let zonas = Layout::horizontal(vec![Constraint::Ratio(1, elegidos.len() as u32); elegidos.len()]).split(area);
-    for (k, zona) in elegidos.iter().zip(zonas.iter()) {
-        // La etiqueta va en el borde, con un espacio a cada lado.
-        let etiqueta = if zona.width as usize >= k.1.chars().count() + 4 { k.1 } else { k.2 };
-        if grande {
-            kpi(f, *zona, etiqueta, &k.3, &k.4, k.5);
-        } else {
-            let t = vec![Line::styled(format!(" {etiqueta}"), tema::apagado()), Line::styled(format!(" {}", k.3), k.5.add_modifier(Modifier::BOLD))];
-            f.render_widget(Paragraph::new(t), *zona);
+/// Unas cifras con puntos guía en `ancho` columnas, con su nota en gris detrás si cabe: con la etiqueta larga si
+/// cabe y, si no, con la corta (y si tampoco, sin las notas).
+fn guias(ks: &[Kpi], ancho: usize) -> Vec<Line<'static>> {
+    let largo = |s: &str| s.chars().count();
+    for (corta, notas) in [(false, true), (true, true), (false, false), (true, false)] {
+        let et = |k: &Kpi| if corta { k.1 } else { k.0 };
+        // Al menos dos puntos; la nota, a dos espacios.
+        let fin = ks.iter().map(|k| largo(et(k)) + largo(&k.2)).max().unwrap_or(0) + 4;
+        let n = if notas { 2 + ks.iter().map(|k| largo(&k.3)).max().unwrap_or(0) } else { 0 };
+        if fin + n <= ancho || (corta && !notas) {
+            return ks
+                .iter()
+                .map(|k| {
+                    let mut l = guia(et(k), k.2.clone(), k.4, fin.min(ancho) as u16);
+                    if notas {
+                        l.push_span(Span::styled(format!("  {}", k.3), tema::apagado()));
+                    }
+                    l
+                })
+                .collect();
         }
     }
+    Vec::new()
+}
+
+/// Las cifras del año con puntos guía: en dos columnas de tres si caben (`alto_kpis` dice cuántas filas van).
+fn pintar_kpis(f: &mut Frame, area: Rect, vista: &Vista) {
+    let todos = match vista {
+        Vista::App(c) => kpis_app(c),
+        Vista::Renta(r) => kpis_renta(r),
+    };
+    if area.width >= ANCHO_DOS_KPI {
+        let w = (area.width - 4) / 2;
+        let [a, _, b] = Layout::horizontal([Constraint::Length(w), Constraint::Length(4), Constraint::Length(w)]).areas(area);
+        f.render_widget(Paragraph::new(guias(&todos[..3], a.width as usize)), a);
+        f.render_widget(Paragraph::new(guias(&todos[3..], b.width as usize)), b);
+    } else {
+        f.render_widget(Paragraph::new(guias(&todos, area.width as usize)), area);
+    }
+}
+
+/// Desde este ancho, las cifras de arriba van en dos columnas.
+const ANCHO_DOS_KPI: u16 = 60;
+
+/// Las filas de las cifras de arriba.
+fn alto_kpis(ancho: u16) -> u16 {
+    if ancho >= ANCHO_DOS_KPI { 3 } else { 6 }
 }
 
 /// «Todo al día» y el próximo plazo, para cuando no hay avisos.
@@ -405,11 +455,13 @@ fn al_dia(hoy: &str) -> String {
     }
 }
 
-/// Líneas que ocupa cada aviso con ese ancho (se parten al no caber).
+/// Líneas que ocupa cada aviso con ese ancho (se parten al no caber), con el «● » delante.
 fn alto_aviso(texto: &str, ancho: u16) -> u16 {
-    ((texto.chars().count() + 2).div_ceil(ancho.max(1) as usize)).max(1) as u16
+    filas_partidas(texto, (ancho as usize).saturating_sub(2))
 }
 
+/// Los avisos, sin caja: «● » del color de su urgencia y el texto. Los que quepan; si no caben todos, el último
+/// hueco dice cuántos faltan.
 fn pintar_avisos(f: &mut Frame, area: Rect, av: &[Aviso], hoy: &str) {
     let mut t = Vec::new();
     if av.is_empty() {
@@ -417,12 +469,10 @@ fn pintar_avisos(f: &mut Frame, area: Rect, av: &[Aviso], hoy: &str) {
         let (marca, resto) = txt.split_at(txt.find('.').map(|i| i + 1).unwrap_or(txt.len()));
         t.push(Line::from(vec![Span::styled(marca.to_string(), Style::new().fg(tema::BIEN).add_modifier(Modifier::BOLD)), Span::styled(resto.to_string(), tema::apagado())]));
     } else {
-        // Los que quepan; si no caben todos, el último hueco dice cuántos faltan.
-        let ancho = area.width.saturating_sub(2);
-        let mut caben = area.height.saturating_sub(2).max(1);
+        let mut caben = area.height.max(1);
         let mut muestra = 0;
         for (i, a) in av.iter().enumerate() {
-            let h = alto_aviso(&a.texto, ancho);
+            let h = alto_aviso(&a.texto, area.width);
             let falta_uno = i + 1 < av.len();
             if h > caben || (falta_uno && h + 1 > caben) {
                 break;
@@ -434,18 +484,25 @@ fn pintar_avisos(f: &mut Frame, area: Rect, av: &[Aviso], hoy: &str) {
             let st = match a.urgencia {
                 Urgencia::Alta => Style::new().fg(tema::MAL).add_modifier(Modifier::BOLD),
                 Urgencia::Media => Style::new().fg(tema::AVISO),
-                Urgencia::Normal => Style::new().fg(tema::ACENTO),
+                Urgencia::Normal => Style::new().fg(tema::acento()),
             };
-            t.push(Line::from(vec![Span::styled("● ", st), Span::raw(a.texto.clone())]));
+            t.extend(envolver(&[(a.texto.clone(), Style::new())], area.width as usize, 2).into_iter().enumerate().map(|(i, mut l)| {
+                if i == 0 {
+                    l.spans[0] = Span::styled("● ", st);
+                }
+                l
+            }));
         }
         if muestra < av.len() {
             t.push(Line::styled(format!("  … y {} aviso{} más", av.len() - muestra, if av.len() - muestra == 1 { "" } else { "s" }), tema::apagado()));
         }
     }
-    f.render_widget(Paragraph::new(t).wrap(Wrap { trim: true }).block(bloque("Avisos")), area);
+    f.render_widget(Paragraph::new(t), area);
 }
 
-fn pintar_trimestres(f: &mut Frame, area: Rect, trims: &[Trim], titulo: &str) {
+/// Los trimestres en una tabla sin caja: ingresos, gastos, lo que sale en el 303 y en el 130, si cuadra lo
+/// presentado con tus datos y cómo va cada uno; y la suma del año.
+fn pintar_trimestres(f: &mut Frame, area: Rect, trims: &[Trim]) {
     let corto = area.width < 110;
     let e = |x: f64| if x.abs() <= DIF { "—".to_string() } else if corto { fmt::eur0(x) } else { fmt::eur(x) };
     let eo = |x: Option<f64>| x.map(e).unwrap_or_else(|| "—".into());
@@ -454,7 +511,7 @@ fn pintar_trimestres(f: &mut Frame, area: Rect, trims: &[Trim], titulo: &str) {
     // Presentado, pero sin sus casillas (no se ha leído el PDF): no se sabe el importe.
     let sin_pdf = |e: &Estado, r: Option<f64>| matches!(e, Estado::Presentado(_)) && r.is_none();
     // Primero los textos: los importes nunca se cortan (el ancho de su columna sale de lo que hay en ella).
-    let mut filas: Vec<[(String, Style); 6]> = trims
+    let mut filas: Vec<[(String, Style); 7]> = trims
         .iter()
         .map(|t| {
             // Lo que no ha empezado o no toca (antes del alta, después de la baja) no lleva importe.
@@ -470,12 +527,21 @@ fn pintar_trimestres(f: &mut Frame, area: Rect, trims: &[Trim], titulo: &str) {
                 Some(r) if !sin && r.abs() > DIF => (trimestre::texto130(r, corto), trimestre::estilo_resultado(r)),
                 _ => ("—".to_string(), tema::apagado()),
             };
+            // ¿Cuadra lo presentado con tus datos? (sin datos del trimestre, solo se dice si no cuadra lo encadenado)
+            let cuadra = if !t.no_cuadran.is_empty() {
+                (format!("≠ {}", trimestre::y_lista(&t.no_cuadran)), Style::new().fg(tema::AVISO).add_modifier(Modifier::BOLD))
+            } else if t.comparado {
+                ((if corto { "✓" } else { "✓ cuadra" }).to_string(), Style::new().fg(tema::BIEN))
+            } else {
+                (String::new(), tema::apagado())
+            };
             [
                 (format!("{}T", t.plazo.q), negrita),
                 (eo(t.ingresos), gris(t.ingresos)),
                 (eo(t.gastos), gris(t.gastos)),
                 iva,
                 irpf,
+                cuadra,
                 trimestre::estado_conjunto(&t.e303, &t.e130, &t.plazo, corto),
             ]
         })
@@ -485,14 +551,15 @@ fn pintar_trimestres(f: &mut Frame, area: Rect, trims: &[Trim], titulo: &str) {
     let iva = r2(trims.iter().map(|t| t.r303.unwrap_or(0.0).max(0.0)).sum());
     let irpf = r2(trims.iter().map(|t| if t.exento { 0.0 } else { t.r130.unwrap_or(0.0).max(0.0) }).sum());
     filas.push([
-        ("Año".into(), negrita),
+        ("año".into(), negrita),
         (eo(suma(|t| t.ingresos)), negrita),
         (eo(suma(|t| t.gastos)), negrita),
         (e(iva), negrita),
         (e(irpf), negrita),
-        ((if iva > DIF || irpf > DIF { "a ingresar en el año" } else { "" }).into(), tema::apagado()),
+        (String::new(), tema::apagado()),
+        ((if iva <= DIF && irpf <= DIF { "" } else if area.width < 90 { "a ingresar" } else { "a ingresar en el año" }).into(), tema::apagado()),
     ]);
-    let cabeceras = ["", "Ingresos", "Gastos", "IVA (303)", "IRPF (130)", "Estado"];
+    let cabeceras = ["", "ingresos", "gastos", "IVA (303)", "IRPF (130)", "¿cuadra?", "estado"];
     let ancho = |i: usize| filas.iter().map(|x| x[i].0.chars().count()).chain([cabeceras[i].chars().count()]).max().unwrap_or(0) as u16;
     let anchos = [
         Constraint::Length(ancho(0)),
@@ -500,67 +567,65 @@ fn pintar_trimestres(f: &mut Frame, area: Rect, trims: &[Trim], titulo: &str) {
         Constraint::Length(ancho(2)),
         Constraint::Length(ancho(3)),
         Constraint::Length(ancho(4)),
+        Constraint::Length(ancho(5)),
         Constraint::Min(8),
     ];
-    let cab = Row::new(cabeceras.map(|t| if t == "Estado" || t.is_empty() { Cell::from(t) } else { Cell::from(derecha(t)) })).style(tema::cabecera_tabla());
+    let cab = Row::new(cabeceras.iter().enumerate().map(|(i, t)| if (1..=4).contains(&i) { Cell::from(derecha(*t)) } else { Cell::from(*t) })).style(tema::cabecera_tabla());
     let filas: Vec<Row> = filas
         .into_iter()
         .map(|x| Row::new(x.into_iter().enumerate().map(|(i, (t, st))| if (1..=4).contains(&i) { Cell::from(derecha(t)).style(st) } else { Cell::from(t).style(st) })))
         .collect();
     let espacio = if corto { 1 } else { 3 };
-    f.render_widget(Table::new(filas, anchos).header(cab).column_spacing(espacio).block(bloque(titulo)), area);
+    f.render_widget(Table::new(filas, anchos).header(cab).column_spacing(espacio), area);
 }
 
-/// «Etiqueta ……… valor» en `ancho` caracteres (si no cabe, se corta la etiqueta, nunca el importe).
-fn kv(etq: &str, val: String, ancho: u16, estilo: Style) -> Line<'static> {
-    let sitio = (ancho as usize).saturating_sub(val.chars().count() + 1);
-    let etq: String = if etq.chars().count() > sitio { etq.chars().take(sitio.saturating_sub(1)).chain(['…']).collect() } else { etq.to_string() };
-    let hueco = (ancho as usize).saturating_sub(etq.chars().count() + val.chars().count()).max(1);
-    Line::from(vec![Span::styled(etq, tema::apagado()), Span::raw(" ".repeat(hueco)), Span::styled(val, estilo)])
-}
-
-/// Un año cerrado: lo de la Renta a la izquierda; lo pagado a cuenta y las cuotas a la derecha; y lo que no cuadra.
+/// Un año cerrado, según su Renta: lo de la actividad a la izquierda; lo pagado a cuenta y las cuotas a la
+/// derecha (con puntos guía); y lo que conviene saber.
 fn pintar_renta(f: &mut Frame, area: Rect, r: &DeRenta) {
     let a = &r.a;
-    let b = bloque("Según tu Renta");
-    let b = b.title(Span::styled(format!(" {} ", a.anio), tema::apagado()));
-    let dentro = b.inner(area);
-    f.render_widget(b, area);
-    if dentro.height == 0 || dentro.width < 10 {
+    if area.height == 0 || area.width < 10 {
         return;
     }
-    let dos = dentro.width >= 76;
-    let w = if dos { (dentro.width - 3) / 2 } else { dentro.width };
+    let dos = area.width >= 76;
+    let w = if dos { (area.width - 4) / 2 } else { area.width };
     let eur = fmt::eur;
     let normal = Style::new();
-    let negrita = Style::new().add_modifier(Modifier::BOLD);
+    // Con poco sitio, la etiqueta se corta (el importe nunca).
+    let kv = |etq: &str, val: String, st: Style| {
+        let cabe = (w as usize).saturating_sub(val.chars().count() + 4);
+        let etq: String = if etq.chars().count() > cabe { etq.chars().take(cabe.saturating_sub(1)).chain(['…']).collect() } else { etq.to_string() };
+        guia(etq, val, st, w)
+    };
+    // Con poco sitio, las etiquetas cortas (con su casilla).
+    let ancha = w >= 40;
+    let et = |larga: &'static str, corta: &'static str| if ancha { larga } else { corta };
     let mut izq = vec![
-        kv("Ingresos (0180)", eur(a.ingresos), w, normal),
-        kv("Gastos deducibles", eur(a.gastos), w, normal),
-        kv("Cuota de autónomo (0186)", eur(a.cuota), w, normal),
+        kv("ingresos (0180)", eur(a.ingresos), normal),
+        kv("gastos deducibles", eur(a.gastos), normal),
+        kv(et("cuota de autónomo (0186)", "cuota (0186)"), eur(a.cuota), normal),
     ];
     if a.gdj > DIF {
-        let etq = if w >= 40 { "Difícil justificación" } else { "Difícil justif." };
-        izq.push(kv(&format!("{etq} ({})", fmt::pct(irpf::gdj_reglas(a.anio).0)), eur(a.gdj), w, normal));
+        let etq = et("difícil justificación", "difícil justif.");
+        izq.push(kv(&format!("{etq} ({})", fmt::pct(irpf::gdj_reglas(a.anio).0)), eur(a.gdj), normal));
     }
-    izq.push(kv("Rendimiento neto (0224)", eur(a.neto), w, negrita.fg(tema::ACENTO)));
+    izq.push(kv(et("rendimiento neto (0224)", "rendimiento (0224)"), eur(a.neto), Style::new().fg(tema::acento())));
     if let (Some(red), Some(nr)) = (a.reduccion, a.neto_reducido)
         && red > DIF
     {
-        izq.push(kv("Reducción", eur(red), w, normal));
-        izq.push(kv("Rendimiento neto reducido", eur(nr), w, normal));
+        izq.push(kv("reducción", eur(red), normal));
+        izq.push(kv(et("rendimiento neto reducido", "rend. reducido"), eur(nr), normal));
     }
     let mut der = vec![
-        kv(if w >= 40 { "Retenciones de tus clientes" } else { "Retenciones" }, a.retenciones.map(eur).unwrap_or_else(|| "—".into()), w, normal),
-        kv("Pagos fraccionados (130)", a.fraccionados.map(eur).unwrap_or_else(|| "—".into()), w, normal),
-        kv("IVA ingresado (303)", eur(r.iva), w, normal),
+        kv(et("retenciones de tus clientes", "retenciones"), a.retenciones.map(eur).unwrap_or_else(|| "—".into()), normal),
+        kv(et("pagos fraccionados (130)", "fraccionados (130)"), a.fraccionados.map(eur).unwrap_or_else(|| "—".into()), normal),
+        kv("IVA ingresado (303)", eur(r.iva), normal),
     ];
     if let Some(c) = r.recibos {
-        der.push(kv("Cuotas según tus recibos", eur(c), w, normal));
+        der.push(kv(et("cuotas según tus recibos", "cuotas (recibos)"), eur(c), normal));
     }
     if !a.iae.is_empty() || !a.modalidad.is_empty() {
         let t = [if a.iae.is_empty() { String::new() } else { format!("IAE {}", a.iae) }, a.modalidad.to_lowercase()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-        der.push(kv("Actividad", t, w, tema::apagado()));
+        der.push(kv("actividad", t, tema::apagado()));
     }
     // Lo que conviene saber de ese año.
     let mut notas = Vec::new();
@@ -577,59 +642,69 @@ fn pintar_renta(f: &mut Frame, area: Rect, r: &DeRenta) {
     if let Some(c) = r.recibos.filter(|c| (c - a.cuota).abs() > 1.0) {
         notas.push(format!("Tus recibos de {} suman {}; en la Renta pusiste {}.", a.anio, eur(c), eur(a.cuota)));
     }
+    let notas = notas.into_iter().map(|t| Line::styled(t, tema::apagado()));
     let lineas: Vec<Line> = if dos {
         let n = izq.len().max(der.len());
         let mut v: Vec<Line> = (0..n)
             .map(|i| {
-                let mut s: Vec<Span> = izq.get(i).map(|l| l.spans.clone()).unwrap_or_else(|| vec![Span::raw(" ".repeat(w as usize))]);
-                s.push(Span::raw("   "));
+                let mut s: Vec<Span> = izq.get(i).map(|l| l.spans.clone()).unwrap_or_default();
+                let usado: usize = s.iter().map(Span::width).sum();
+                s.push(Span::raw(" ".repeat((w as usize + 4).saturating_sub(usado))));
                 s.extend(der.get(i).map(|l| l.spans.clone()).unwrap_or_default());
                 Line::from(s)
             })
             .collect();
-        v.extend(notas.into_iter().map(|t| Line::styled(t, tema::apagado())));
+        v.extend(notas);
         v
     } else {
-        izq.into_iter().chain(der).chain(notas.into_iter().map(|t| Line::styled(t, tema::apagado()))).collect()
+        izq.into_iter().chain(der).chain(notas).collect()
     };
-    f.render_widget(Paragraph::new(lineas).wrap(Wrap { trim: false }), dentro);
+    f.render_widget(Paragraph::new(lineas).wrap(Wrap { trim: false }), area);
 }
 
-fn bloque_meses(anio: i32, abajo: Option<String>) -> Block<'static> {
-    let titulo = Line::from(vec![
-        Span::styled(format!(" Ingresos y gastos por mes · {anio} "), tema::titulo()),
-        Span::styled("■", Style::new().fg(tema::ACENTO)),
-        Span::styled(" ingresos sin IVA  ", tema::apagado()),
-        Span::styled("■", Style::new().fg(tema::AVISO)),
-        Span::styled(" gastos deducibles ", tema::apagado()),
+/// Las filas que ocupa `pintar_renta` en `ancho` columnas (aproximado: sus notas, de una fila).
+fn alto_renta(r: &DeRenta, ancho: u16) -> u16 {
+    let a = &r.a;
+    let izq = 4 + usize::from(a.gdj > DIF) + 2 * usize::from(a.reduccion.is_some_and(|x| x > DIF) && a.neto_reducido.is_some());
+    let der = 3 + usize::from(r.recibos.is_some()) + usize::from(!a.iae.is_empty() || !a.modalidad.is_empty());
+    let notas = usize::from(r.sin130) + usize::from(r.sin_casillas > 0) + usize::from(r.recibos.is_some_and(|c| (c - a.cuota).abs() > 1.0));
+    (if ancho >= 76 { izq.max(der) } else { izq + der } + notas) as u16
+}
+
+/// El título de los meses, sin caja: qué es cada color y, a la derecha, el máximo.
+fn titulo_meses(f: &mut Frame, area: Rect, abajo: Option<String>) {
+    let l = Line::from(vec![
+        Span::styled("ingresos y gastos por mes   ", tema::apagado()),
+        Span::styled("■", Style::new().fg(tema::acento())),
+        Span::styled(" ingresos sin IVA   ", tema::apagado()),
+        Span::styled("■", Style::new().fg(tema::AZUL)),
+        Span::styled(" gastos deducibles", tema::apagado()),
     ]);
-    let b = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(tema::apagado()).title(titulo);
-    match abajo {
-        Some(t) => b.title_bottom(Line::styled(format!(" {t} "), tema::apagado()).right_aligned()),
-        None => b,
+    let fila = Rect { height: area.height.min(1), ..area };
+    f.render_widget(Paragraph::new(l), fila);
+    if let Some(t) = abajo {
+        f.render_widget(Paragraph::new(Line::styled(t, tema::apagado()).right_aligned()), fila);
     }
 }
 
-/// Barras de ingresos y gastos, mes a mes, con el importe dentro si cabe («1,2k»).
+/// Barras de ingresos y gastos, mes a mes, con el importe dentro si cabe («1,2k»). Sin caja; el título, arriba.
 fn pintar_grafico(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
     let max = c.ing.iter().chain(&c.gas).fold(0.0_f64, |m, x| m.max(*x));
-    let b = bloque_meses(anio, (max > 0.5).then(|| format!("máx. {}", compacto(max))));
-    let dentro = b.inner(area);
-    f.render_widget(b, area);
+    titulo_meses(f, area, (max > 0.5).then(|| format!("máx. {}", compacto(max))));
+    let dentro = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
     if dentro.height < 2 || dentro.width < 4 {
         return;
     }
     if max <= 0.5 {
-        let y = dentro.y + dentro.height / 2;
-        f.render_widget(Paragraph::new(Line::styled(format!("Sin ingresos ni gastos en {anio}."), tema::apagado()).centered()), Rect { y, height: 1, ..dentro });
+        f.render_widget(Paragraph::new(Line::styled(format!("Sin ingresos ni gastos en {anio}."), tema::apagado())), Rect { height: 1, ..dentro });
         return;
     }
     // 12 grupos de dos barras, con un hueco entre las dos barras y otro mayor entre meses.
     let w = (dentro.width.saturating_sub(46) / 24).min(6); // 12 × (2 barras + 2 huecos) + 11 × 2
     if w == 0 {
         let t = vec![
-            Line::from(vec![Span::styled("Ingresos ", tema::apagado()), Span::raw(compacto(c.ing.iter().sum()))]),
-            Line::from(vec![Span::styled("Gastos   ", tema::apagado()), Span::raw(compacto(c.gas.iter().sum()))]),
+            Line::from(vec![Span::styled("ingresos ", tema::apagado()), Span::raw(compacto(c.ing.iter().sum()))]),
+            Line::from(vec![Span::styled("gastos   ", tema::apagado()), Span::raw(compacto(c.gas.iter().sum()))]),
             Line::styled("Más ancho para ver los meses.", tema::apagado()),
         ];
         f.render_widget(Paragraph::new(t), dentro);
@@ -640,26 +715,25 @@ fn pintar_grafico(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
             .value(x.max(0.0).round() as u64)
             .text_value(if x > 0.5 && compacto(x).chars().count() <= w as usize { compacto(x) } else { String::new() })
             .style(Style::new().fg(color))
-            .value_style(Style::new().fg(Color::Black).bg(color))
+            .value_style(Style::new().fg(tema::FONDO).bg(color))
     };
     let grupos: Vec<BarGroup> = (0..12)
         .map(|i| {
             let mes = fmt::MESES_C[i];
             let etiqueta = if w * 2 >= 3 { mes.to_string() } else { mes.chars().take(1).collect::<String>().to_uppercase() };
-            BarGroup::default().label(Line::styled(etiqueta, tema::apagado())).bars(&[barra(c.ing[i], tema::ACENTO), barra(c.gas[i], tema::AVISO)])
+            BarGroup::default().label(Line::styled(etiqueta, tema::apagado())).bars(&[barra(c.ing[i], tema::acento()), barra(c.gas[i], tema::AZUL)])
         })
         .collect();
     let usado = (w * 24 + 46).min(dentro.width);
-    let zona = Rect { x: dentro.x + (dentro.width - usado) / 2, width: usado, ..dentro };
+    let zona = Rect { width: usado, ..dentro };
     let grafico = BarChart::grouped(grupos).bar_width(w).bar_gap(1).group_gap(2).max(max.round().max(1.0) as u64);
     f.render_widget(grafico, zona);
 }
 
 /// Los meses en una tabla: ingresos, gastos y la diferencia (importes cortos). Para cuando el gráfico no cabe.
-fn pintar_tabla_meses(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
-    let b = bloque_meses(anio, None);
-    let dentro = b.inner(area);
-    f.render_widget(b, area);
+fn pintar_tabla_meses(f: &mut Frame, area: Rect, c: &Cifras) {
+    titulo_meses(f, area, None);
+    let dentro = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
     let lw = 11usize;
     let cw = ((dentro.width as usize).saturating_sub(lw) / 13).clamp(4, 10);
     let celda = |s: String| format!("{s:>cw$}");
@@ -679,11 +753,25 @@ fn pintar_tabla_meses(f: &mut Frame, area: Rect, c: &Cifras, anio: i32) {
     let dif: [f64; 12] = std::array::from_fn(|i| r2(c.ing[i] - c.gas[i]));
     let t = vec![
         Line::styled(cab, tema::cabecera_tabla()),
-        fila("Ingresos", c.ing, Style::new().fg(tema::ACENTO)),
-        fila("Gastos", c.gas, Style::new().fg(tema::AVISO)),
-        fila("Diferencia", dif, Style::new()),
+        fila("ingresos", c.ing, Style::new().fg(tema::acento())),
+        fila("gastos", c.gas, Style::new().fg(tema::AZUL)),
+        fila("diferencia", dif, Style::new()),
     ];
     f.render_widget(Paragraph::new(t), dentro);
+}
+
+/// Parte `area` en filas: las de cada alto, una tras otra (lo que no quepa, de alto 0).
+fn filas_de(area: Rect, altos: &[u16]) -> Vec<Rect> {
+    let mut y = area.y;
+    altos
+        .iter()
+        .map(|&h| {
+            let h = h.min(area.bottom().saturating_sub(y));
+            let r = Rect { y, height: h, ..area };
+            y += h;
+            r
+        })
+        .collect()
 }
 
 impl Anio {
@@ -707,36 +795,64 @@ impl Anio {
         self.calculo = None;
     }
 
+    /// De cada trimestre del año que se ve, el resultado del 303 y el del 130 (lo presentado si se sabe; si no,
+    /// con tus datos) y si el 303 negativo se pide devolver: para la fila del año de cada trimestre.
+    pub(super) fn resultados(&mut self, ctx: &Ctx) -> Vec<(Option<f64>, Option<f64>, bool)> {
+        self.preparar(ctx).trims().iter().map(|t| (t.r303, t.r130, t.devolver)).collect()
+    }
+
+    /// Sin cajas y, de arriba abajo: las cifras del año con puntos guía, los trimestres (lo presentado frente a
+    /// tus datos: lo principal), los avisos y, con lo que quede, los meses (o, en un año cerrado, lo que dice su
+    /// Renta). Con poca altura se quedan fuera, por este orden, los meses y los avisos (en un año cerrado, primero
+    /// los avisos).
     pub(super) fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         let c = self.preparar(ctx);
         let hoy = &c.clave.2;
         let av = &c.avisos;
-        // Con poca altura, las cifras van en dos líneas sin recuadro.
-        let grande = area.height >= 27;
-        let ancho = area.width.saturating_sub(2);
-        let n_av = if av.is_empty() { alto_aviso(&al_dia(hoy), ancho) } else { av.iter().map(|a| alto_aviso(&a.texto, ancho)).sum::<u16>() };
-        let n_av = n_av.min(if grande { 6 } else { 3 });
-        let [a_kpi, a_av, a_trim, a_mes] =
-            Layout::vertical([Constraint::Length(if grande { 5 } else { 2 }), Constraint::Length(n_av + 2), Constraint::Length(8), Constraint::Min(0)]).areas(area);
-        pintar_kpis(f, a_kpi, &c.vista, grande);
-        pintar_avisos(f, a_av, av, hoy);
         let anio = ctx.anio;
-        match &c.vista {
-            Vista::App(cf) => {
-                pintar_trimestres(f, a_trim, c.trims(), &format!("Trimestres de {anio}"));
-                // Con poca altura, el gráfico no se lee: mejor la tabla.
-                if a_mes.height >= 8 {
-                    pintar_grafico(f, a_mes, cf, anio);
-                } else if a_mes.height >= 5 {
-                    pintar_tabla_meses(f, a_mes, cf, anio);
-                }
+        let h_kpi = alto_kpis(area.width);
+        // El título, la cabecera, los cuatro trimestres y el año.
+        let h_trim = 7;
+        let mut libre = area.height.saturating_sub(h_kpi + 1 + h_trim);
+        let n_av = if av.is_empty() { alto_aviso(&al_dia(hoy), area.width) } else { av.iter().map(|a| alto_aviso(&a.texto, area.width)).sum::<u16>() }.min(6);
+        // Los avisos, con una fila de aire y su título; lo de abajo, igual.
+        let (h_av, h_abajo) = match &c.vista {
+            Vista::App(_) => {
+                let h_av = if libre >= 3 { (n_av + 2).min(libre) } else { 0 };
+                libre -= h_av;
+                (h_av, if libre >= 6 { libre } else { 0 })
             }
             Vista::Renta(r) => {
-                pintar_trimestres(f, a_trim, c.trims(), &format!("Trimestres de {anio} · lo presentado"));
-                if a_mes.height >= 3 {
-                    pintar_renta(f, a_mes, r);
-                }
+                let h_abajo = if libre >= 5 { (alto_renta(r, area.width) + 2).min(libre) } else { 0 };
+                libre -= h_abajo;
+                (if libre >= 3 { (n_av + 2).min(libre) } else { 0 }, h_abajo)
             }
+        };
+        let z = filas_de(area, &[h_kpi, 1, h_trim, h_av, h_abajo]);
+        pintar_kpis(f, z[0], &c.vista);
+        let titulo = match &c.vista {
+            Vista::App(_) => format!("trimestres de {anio}"),
+            Vista::Renta(_) => format!("trimestres de {anio} · lo presentado"),
+        };
+        let [t, tabla] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(z[2]);
+        f.render_widget(Paragraph::new(titulo_bloque(titulo)), t);
+        pintar_trimestres(f, tabla, c.trims());
+        if h_av >= 3 {
+            let [_, t, lista] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)]).areas(z[3]);
+            f.render_widget(Paragraph::new(titulo_bloque("avisos")), t);
+            pintar_avisos(f, lista, av, hoy);
+        }
+        let [_, abajo] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(z[4]);
+        match &c.vista {
+            // Con poca altura, el gráfico no se lee: mejor la tabla.
+            Vista::App(cf) if h_abajo >= 6 && abajo.height >= 7 => pintar_grafico(f, abajo, cf, anio),
+            Vista::App(cf) if h_abajo >= 6 => pintar_tabla_meses(f, abajo, cf),
+            Vista::Renta(r) if h_abajo >= 5 => {
+                let [t, resto] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(abajo);
+                f.render_widget(Paragraph::new(titulo_bloque(format!("según tu Renta de {anio}"))), t);
+                pintar_renta(f, resto, r);
+            }
+            _ => {}
         }
     }
 }

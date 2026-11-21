@@ -3,13 +3,15 @@
 //! salen de `informe::anio`; aquí solo se pintan, y se rehacen solo cuando cambian los datos (`ctx.generacion`) o el
 //! año.
 //!
+//! Va en el estilo C2: sin cajas, los títulos de bloque en gris y los colores de la paleta (`tema`).
+//!
 //! - `anios_lista`: el gráfico y la tabla.
-//! - `anios_balance`: un año: sus cifras y su Renta casilla a casilla.
-//! - `anios_renta`: la Renta de un año, casilla a casilla, y el gráfico de lo que salió cada año.
+//! - `anios_balance`: un año: lo que salió (en una banda), el porqué, tus Rentas y, bajando, todo lo demás.
+//! - `anios_renta`: la Renta de un año: su recibo, casilla a casilla, y el gráfico de lo que salió cada año.
 //! - `anios_grafico`: las barras apiladas del gráfico.
 //! - `anios_reparto`: un año, cada fuente paso a paso y de dónde sale cada cifra.
 
-use crate::dominio::fmt;
+use crate::dominio::fmt::{self, DIF};
 use crate::informe::anio::{Anio, Concepto};
 use crate::dominio::PRIMER_ANIO;
 use crate::informe;
@@ -27,27 +29,52 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use super::{anios_balance as balance, anios_lista as lista, anios_renta as renta};
 
 
-/// El color de cada concepto, siempre el mismo y en este orden (lo que ganas en fríos, lo que pagas en cálidos).
-/// Son colores con nombre del terminal: cada tema (claro u oscuro) los ajusta para que se lean.
+/// El color de cada concepto, siempre el mismo y de la paleta. Lo que ganas, en el color de la sección y en verde
+/// (el ahorro); lo que pagas, como en Inicio: el IRPF en AVISO y la Seguridad Social en azul. Los tonos de más
+/// salen de mezclar esos colores.
 pub(super) fn color(c: Concepto) -> Color {
     match c {
-        Concepto::Sueldo => Color::Blue,
-        Concepto::Actividad => tema::ACENTO,
+        Concepto::Sueldo => tema::mezcla(tema::acento(), tema::TINTA, 0.4),
+        Concepto::Actividad => tema::acento(),
         Concepto::Capital => tema::BIEN,
-        Concepto::Ganancias => Color::LightGreen,
-        Concepto::OtrasRentas => Color::Magenta,
-        Concepto::Irpf => tema::MAL,
-        Concepto::TuNomina => tema::AVISO,
-        Concepto::Cuota => Color::LightRed,
+        Concepto::Ganancias => tema::mezcla(tema::BIEN, tema::FONDO, 0.6),
+        Concepto::OtrasRentas => tema::mezcla(tema::BIEN, tema::AZUL, 0.5),
+        Concepto::Irpf => tema::AVISO,
+        Concepto::TuNomina => tema::AZUL,
+        Concepto::Cuota => tema::mezcla(tema::AZUL, tema::FONDO, 0.6),
     }
 }
 
-/// Lo que pagó tu empresa, en gris.
-pub(super) const COLOR_EMPRESA: Color = tema::APAGADO;
-/// En el gráfico sencillo: lo que ganas, lo que pagas y lo que te queda.
-pub(super) const COLOR_GANAS: Color = Color::Blue;
-pub(super) const COLOR_PAGAS: Color = tema::MAL;
+/// Lo que pagó tu empresa: un tramo neutro.
+pub(super) const COLOR_EMPRESA: Color = tema::MARCO;
+/// En el gráfico sencillo: lo que ganas (el color de la sección), lo que pagas y lo que te queda.
+pub(super) fn color_ganas() -> Color {
+    tema::acento()
+}
+pub(super) const COLOR_PAGAS: Color = tema::AVISO;
 pub(super) const COLOR_QUEDA: Color = tema::BIEN;
+
+/// Lo que salió en una Renta: a pagar en AVISO, a devolver en verde (a cero, en TINTA).
+pub(super) fn color_resultado(x: f64) -> Style {
+    if x > DIF {
+        Style::new().fg(tema::AVISO)
+    } else if x < -DIF {
+        Style::new().fg(tema::BIEN)
+    } else {
+        Style::new().fg(tema::TINTA)
+    }
+}
+
+/// Para los títulos y la leyenda, en minúscula como pide el estilo: «Sueldo» → «sueldo». Las siglas («IRPF») y
+/// los nombres propios («Hacienda: IRPF», «Seguridad Social…», «Renta») se quedan como están.
+pub(super) fn minuscula(s: &str) -> String {
+    let propio = ["Hacienda", "Seguridad", "Renta"].iter().any(|p| s.starts_with(p));
+    let mut c = s.chars();
+    match (c.next(), c.next()) {
+        (Some(a), Some(b)) if !propio && b.is_lowercase() => a.to_lowercase().chain(s[a.len_utf8()..].chars()).collect(),
+        _ => s.to_string(),
+    }
+}
 
 /// Lo último que se pintó de una pantalla, para repetirlo tal cual mientras no cambie nada: la app repinta cada
 /// medio segundo y pintar una pantalla entera cuesta bastante más que copiarla.
@@ -240,5 +267,19 @@ impl Pantalla for Anios {
         self.vista.olvidar();
         self.al_dia(ctx);
         self.seguir(ctx.anio);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn en_minuscula_salvo_siglas_y_nombres_propios() {
+        assert_eq!(minuscula("Sueldo"), "sueldo");
+        assert_eq!(minuscula("Ánimo"), "ánimo");
+        for igual in ["IRPF", "Hacienda: IRPF", "Seguridad Social: tu cuota de autónomo", "Renta", "%", ""] {
+            assert_eq!(minuscula(igual), igual);
+        }
     }
 }

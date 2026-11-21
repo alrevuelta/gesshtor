@@ -1,21 +1,23 @@
 //! «Utilidades»: herramientas que no dependen de tus datos. De momento, la calculadora de sueldos, con dos
-//! pestañas (← →): Asalariado (de un sueldo bruto, lo que le cuestas a tu empresa y lo que te queda) y Autónomo (de
-//! lo que facturas, tu cuota, tu IRPF y lo que te queda). Los datos (el año, la comunidad, el sueldo…) se ven siempre
-//! arriba, en «Tus datos», y se cambian con Enter. Las cuentas, en `informe::calculadora`.
-use super::anios_reparto::{importe, Pasos};
-use super::empleo::pct1;
-use crate::dominio::fmt::{self, eur, DIF};
-use crate::hacienda::irpf::{nombre_comunidad, COMUNIDADES};
-use crate::informe::calculadora::{asalariado, autonomo, Asalariado, Autonomo, Concepto};
+//! pestañas (← →): Asalariado (de un sueldo bruto, lo que te queda, lo que te quitan y lo que le cuestas a tu
+//! empresa) y Autónomo (de lo que facturas, lo que te queda, tu IRPF y tu cuota). Debajo, lo mismo en cada
+//! comunidad, de más a menos: con ↑↓ se elige una y se ve cuánto cambia en las demás. Los datos (el sueldo, el
+//! año…) se cambian con Enter; el detalle, concepto a concepto, con `d`. Las cuentas, en `informe::calculadora`.
+//!
+//! Estilo C2: lo que te queda al mes, en una banda; el reparto, con una barra fina y puntos guía; las comunidades,
+//! en una lista sin caja con la elegida en el fondo suave de la sección.
+use crate::dominio::fmt::{self, eur, eur0, DIF};
+use crate::informe::calculadora::{asalariado, asalariado_por_comunidad, autonomo, autonomo_por_comunidad, Asalariado, Autonomo, Concepto, EnComunidad};
+use crate::hacienda::irpf::nombre_comunidad;
 use crate::tgss::reglas;
-use crate::tui::anios::vinetas;
-use crate::tui::widgets::{bloque, kpi, tema, Formulario, Resultado};
+use crate::tui::texto::envolver;
+use crate::tui::widgets::{atajo, banda, barra, derecha, guia, linea_atajos, muestra, tema, titulo_bloque, Formulario, Resultado, ALTO_BANDA};
 use crate::tui::{Ctx, Pantalla};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -35,16 +37,31 @@ pub struct Calculadora {
     temporal: bool,
     facturado: f64,
     gastos: f64,
-    /// La clave de la comunidad; None: la de tus datos (la de tu última Renta).
+    /// La clave de la comunidad elegida; None: la de tus datos (la de tu última Renta).
     comunidad: Option<String>,
     form: Option<Formulario>,
+    /// Se ve el detalle, concepto a concepto, en vez de las comunidades.
+    detalle: bool,
     scroll: u16,
-    scroll_max: u16,
+    tabla: TableState,
 }
 
 impl Default for Calculadora {
     fn default() -> Self {
-        Calculadora { pestana: Pestana::default(), anio: fmt::anio_actual(), bruto: 30000.0, pagas: 14, temporal: false, facturado: 40000.0, gastos: 5000.0, comunidad: None, form: None, scroll: 0, scroll_max: 0 }
+        Calculadora {
+            pestana: Pestana::default(),
+            anio: fmt::anio_actual(),
+            bruto: 30000.0,
+            pagas: 14,
+            temporal: false,
+            facturado: 40000.0,
+            gastos: 5000.0,
+            comunidad: None,
+            form: None,
+            detalle: false,
+            scroll: 0,
+            tabla: TableState::default(),
+        }
     }
 }
 
@@ -61,29 +78,47 @@ fn tipo(t: f64) -> String {
     format!("{} %", fmt::num(t).trim_end_matches(",00"))
 }
 
-/// Las líneas de lo cotizado por conceptos, cada una con su tipo.
-fn conceptos(p: &mut Pasos, v: &[Concepto]) {
-    for c in v.iter().filter(|c| c.importe.abs() > DIF) {
-        let et = match c.tipo {
-            Some(t) => format!("{} · {}", c.nombre, tipo(t)),
-            None => c.nombre.clone(),
-        };
-        p.detalle(&et, c.importe);
+/// «39,6 %» (un decimal, sin «,0»).
+fn pct1(x: f64) -> String {
+    let s = format!("{:.1}", (x * 10.0).round() / 10.0).replace('.', ",");
+    format!("{} %", s.trim_end_matches(",0"))
+}
+
+/// «1.234,56 €», «−2.746,00 €»
+fn importe(x: f64) -> String {
+    if x < -DIF { format!("−{}", eur(-x)) } else { eur(x) }
+}
+
+/// «+1.234 €», «−80 €» (redondeado).
+fn diferencia(x: f64) -> String {
+    match x {
+        x if x > 0.5 => format!("+{}", eur0(x)),
+        x if x < -0.5 => format!("−{}", eur0(-x)),
+        _ => "igual".into(),
     }
 }
 
-/// «el 40,8 % de lo que le cuestas a tu empresa y el 21,8 % de tu bruto»
+/// «el 21,8 %» de `sobre`.
 fn de(x: f64, sobre: f64) -> String {
     if sobre.abs() > DIF { pct1(x / sobre * 100.0) } else { "—".into() }
 }
 
-/// Los datos («Año 2026», «Pagas 14»…) en líneas de `w` columnas, sin partir ninguno.
+/// Los colores del reparto (la barra fina y el «█» de cada línea): lo que te queda, la Seguridad Social (o la cuota
+/// de autónomo), el IRPF y lo que paga tu empresa.
+const QUEDA: Color = tema::BIEN;
+const SS: Color = tema::AZUL;
+const IRPF: Color = tema::AVISO;
+const EMPRESA: Color = tema::MARCO;
+
+/// Los datos («bruto 30.000 € al año», «pagas 14»…; sin nombre, solo el valor) en líneas de `w` columnas, sin
+/// partir ninguno: el nombre en gris y el valor en negrita, del color de la sección.
 fn repartir(campos: Vec<(&str, String)>, w: usize) -> Vec<Line<'static>> {
     let mut lineas = Vec::new();
     let mut l: Vec<Span> = Vec::new();
     let mut usado = 0;
     for (k, v) in campos {
-        let largo = k.chars().count() + 1 + v.chars().count();
+        let k = if k.is_empty() { String::new() } else { format!("{k} ") };
+        let largo = k.chars().count() + v.chars().count();
         if usado > 0 && usado + 3 + largo > w {
             lineas.push(Line::from(std::mem::take(&mut l)));
             usado = 0;
@@ -92,8 +127,8 @@ fn repartir(campos: Vec<(&str, String)>, w: usize) -> Vec<Line<'static>> {
             l.push(Span::raw("   "));
             usado += 3;
         }
-        l.push(Span::styled(format!("{k} "), gris()));
-        l.push(Span::styled(v, negrita().fg(tema::ACENTO)));
+        l.push(Span::styled(k, gris()));
+        l.push(Span::styled(v, negrita().fg(tema::acento())));
         usado += largo;
     }
     if !l.is_empty() {
@@ -102,39 +137,82 @@ fn repartir(campos: Vec<(&str, String)>, w: usize) -> Vec<Line<'static>> {
     lineas
 }
 
+/// Una línea con puntos guía hasta `fin` y su nota en gris: detrás si cabe en `ancho`; si no, debajo y con sangría.
+fn con_nota(mut l: Line<'static>, nota: Line<'static>, ancho: u16) -> Vec<Line<'static>> {
+    if l.width() + 3 + nota.width() <= ancho as usize {
+        l.push_span(Span::raw("   "));
+        l.spans.extend(nota.spans);
+        return vec![l];
+    }
+    let mut debajo = Line::from(Span::raw("    "));
+    debajo.spans.extend(nota.spans);
+    vec![l, debajo]
+}
+
+/// Una nota en gris con algún importe en negrita (y en TINTA): «te quitan », «6.548,02 €».
+fn nota(trozos: &[(&str, bool)]) -> Line<'static> {
+    Line::from(trozos.iter().map(|(t, fuerte)| Span::styled(t.to_string(), if *fuerte { negrita() } else { gris() })).collect::<Vec<_>>())
+}
+
+/// La línea de una banda: la etiqueta, con dos de margen, y la cifra acabando en `fin`, sin puntos (como en los
+/// bocetos); las dos en negrita y en `st`.
+fn en_banda(et: &str, cifra: String, st: Style, fin: u16) -> Line<'static> {
+    let hueco = (fin as usize).saturating_sub(2 + et.chars().count() + cifra.chars().count()).max(1);
+    Line::from(vec![Span::raw("  "), Span::styled(et.to_string(), st), Span::raw(" ".repeat(hueco)), Span::styled(cifra, st)])
+}
+
+/// Una línea del reparto: «█ te queda ········ 23.451,98 €», con el «█» del color de su tramo.
+fn tramo(color: Color, et: &str, x: f64, st: Style, fin: u16) -> Line<'static> {
+    guia(Line::from(vec![muestra(color), Span::styled(et.to_string(), st)]), eur(x), st, fin)
+}
+
+/// Lo que se calcula con los datos de la pestaña, en la comunidad elegida.
+enum Cuenta {
+    Asalariado(Asalariado),
+    Autonomo(Autonomo),
+}
+
 impl Calculadora {
-    /// La comunidad con que se calcula: la elegida o la de tus datos.
-    fn comunidad(&self, ctx: &Ctx) -> String {
-        self.comunidad.clone().unwrap_or_else(|| crate::informe::empleo::comunidad(&ctx.datos, ctx.anio).map(|c| c.0.to_string()).unwrap_or_default())
+    /// Lo mismo en cada comunidad, de más a menos.
+    fn comunidades(&self) -> Vec<EnComunidad> {
+        match self.pestana {
+            Pestana::Asalariado => asalariado_por_comunidad(self.bruto, self.temporal, self.anio),
+            Pestana::Autonomo => autonomo_por_comunidad(self.facturado, self.gastos, self.anio),
+        }
     }
 
-    fn formulario(&self, ctx: &Ctx) -> Formulario {
-        let com: Vec<(&str, &str)> = std::iter::once(("", "Sin elegir (escala estatal)")).chain(COMUNIDADES.iter().map(|(k, n)| (*k, *n))).collect();
-        let c = self.comunidad(ctx);
+    /// La comunidad elegida (su posición en `v`): la que eligieras, la de tus datos o, si no, la primera.
+    fn elegida(&self, v: &[EnComunidad], ctx: &Ctx) -> usize {
+        let tuya = || crate::informe::empleo::comunidad(&ctx.datos, ctx.anio).map(|c| c.0.to_string());
+        let c = self.comunidad.clone().or_else(tuya).unwrap_or_default();
+        v.iter().position(|x| x.clave == c).unwrap_or(0)
+    }
+
+    fn cuenta(&self, comunidad: &str) -> Cuenta {
+        match self.pestana {
+            Pestana::Asalariado => Cuenta::Asalariado(asalariado(self.bruto, self.temporal, comunidad, self.anio)),
+            Pestana::Autonomo => Cuenta::Autonomo(autonomo(self.facturado, self.gastos, comunidad, self.anio)),
+        }
+    }
+
+    fn formulario(&self) -> Formulario {
         // Los años con reglas de cotización en la app, y el siguiente (con las últimas que tenga).
         let anios: Vec<String> = (2025..=fmt::anio_actual() + 1).map(|y| y.to_string()).collect();
         let anios: Vec<(&str, &str)> = anios.iter().map(|y| (y.as_str(), y.as_str())).collect();
-        let fm = Formulario::new(match self.pestana {
-            Pestana::Asalariado => "Tus datos · asalariado",
-            Pestana::Autonomo => "Tus datos · autónomo",
-        })
-        .opciones("anio", "Año", &anios, &self.anio.to_string())
-        .ayuda("← → para cambiarlo: las reglas de ese año.")
-        .opciones("comunidad", "Comunidad", &com, &c)
-        .ayuda("← → para elegirla: la parte autonómica del IRPF.");
-        match self.pestana {
-            Pestana::Asalariado => fm
+        let fm = match self.pestana {
+            Pestana::Asalariado => Formulario::new("Tu sueldo")
                 .numero("bruto", "Sueldo bruto al año", Some(self.bruto))
                 .ayuda("Todo lo del año, con las pagas extra.")
                 .opciones("pagas", "Pagas", &[("12", "12"), ("14", "14")], &self.pagas.to_string())
                 .ayuda("← → para cambiarlo. Solo cambia lo que cobras cada mes.")
                 .opciones("contrato", "Contrato", &[("indefinido", "Indefinido"), ("temporal", "Temporal")], if self.temporal { "temporal" } else { "indefinido" })
                 .ayuda("Con uno temporal, el desempleo es algo más caro."),
-            Pestana::Autonomo => fm
+            Pestana::Autonomo => Formulario::new("Tu actividad")
                 .numero("facturado", "Facturas al año (sin IVA)", Some(self.facturado))
                 .numero("gastos", "Gastos de la actividad", Some(self.gastos))
                 .ayuda("Sin la cuota de autónomo, que se calcula."),
-        }
+        };
+        fm.opciones("anio", "Año", &anios, &self.anio.to_string()).ayuda("← → para cambiarlo: las reglas de ese año.")
     }
 
     /// Lo del formulario, a la calculadora.
@@ -151,170 +229,283 @@ impl Calculadora {
                 self.gastos = n("gastos", self.gastos);
             }
         }
-        self.comunidad = Some(fm.get("comunidad"));
         self.anio = fm.get("anio").parse().unwrap_or(self.anio);
         self.scroll = 0;
     }
 
-    /// Las pestañas.
-    fn pestanas(&self) -> Line<'static> {
+    /// Las pestañas (← → para pasar de una a otra), con la elegida en FONDO sobre el color de la sección; a la
+    /// derecha, las teclas de cambiar los datos y del detalle.
+    fn pintar_pestanas(&self, f: &mut Frame, fila: Rect) {
         let pestana = |t: &str, si: bool| Span::styled(format!(" {t} "), if si { tema::pestana_activa() } else { gris() });
-        Line::from(vec![pestana("Asalariado", self.pestana == Pestana::Asalariado), Span::raw(" "), pestana("Autónomo", self.pestana == Pestana::Autonomo)])
+        let l = Line::from(vec![
+            Span::styled("← → ", negrita()),
+            pestana("Asalariado", self.pestana == Pestana::Asalariado),
+            Span::raw("  "),
+            pestana("Autónomo", self.pestana == Pestana::Autonomo),
+        ]);
+        let usado = l.width();
+        f.render_widget(Paragraph::new(l), fila);
+        let teclas = linea_atajos(&[("Enter", "cambiar"), ("d", if self.detalle { "comunidades" } else { "detalle" })]);
+        if usado + 5 + teclas.width() <= fila.width as usize {
+            f.render_widget(Paragraph::new(teclas.right_aligned()), fila);
+        }
     }
 
     /// Con qué se calcula: (nombre, valor).
-    fn campos(&self, ctx: &Ctx) -> Vec<(&'static str, String)> {
-        let c = self.comunidad(ctx);
-        let com = if c.is_empty() { "sin elegir".to_string() } else { nombre_comunidad(&c).to_string() };
-        let mut campos: Vec<(&'static str, String)> = vec![("Año", self.anio.to_string()), ("Comunidad", com)];
-        match self.pestana {
-            Pestana::Asalariado => campos.extend([
-                ("Sueldo bruto", format!("{} al año", eur(self.bruto))),
-                ("Pagas", self.pagas.to_string()),
-                ("Contrato", if self.temporal { "temporal" } else { "indefinido" }.to_string()),
-            ]),
-            Pestana::Autonomo => campos.extend([("Facturas", format!("{} sin IVA", eur(self.facturado))), ("Gastos", eur(self.gastos))]),
-        }
+    fn campos(&self, comunidad: &str) -> Vec<(&'static str, String)> {
+        let mut campos: Vec<(&'static str, String)> = match self.pestana {
+            Pestana::Asalariado => vec![
+                ("bruto", format!("{} al año", eur0(self.bruto))),
+                ("pagas", self.pagas.to_string()),
+                ("contrato", if self.temporal { "temporal" } else { "indefinido" }.to_string()),
+            ],
+            Pestana::Autonomo => vec![("facturas", format!("{} al año, sin IVA", eur0(self.facturado))), ("gastos", eur0(self.gastos))],
+        };
+        campos.push(("año", self.anio.to_string()));
+        // El nombre ya dice qué es («Comunidad de Madrid», «Andalucía»).
+        campos.push(("", comunidad.to_string()));
         campos
     }
 
-    /// «Tus datos»: con qué se calcula, siempre a la vista (Enter para cambiarlos).
-    fn pintar_datos(&self, f: &mut Frame, area: Rect, ctx: &Ctx) {
-        let campos = self.campos(ctx);
-        let b = bloque("Tus datos").title_bottom(Line::from(vec![Span::styled(" Enter ", tema::pestana_activa()), Span::styled(" cambiarlos ", gris())]).right_aligned());
-        let b = b.padding(ratatui::widgets::Padding::horizontal(1));
-        let lineas = repartir(campos, b.inner(area).width as usize);
-        f.render_widget(Paragraph::new(lineas).block(b), area);
+    /// Lo que se calcula, siempre a la vista (Enter para cambiarlo); debajo, si la app no tiene el IRPF de tu
+    /// comunidad (País Vasco y Navarra, forales; Ceuta y Melilla, con su deducción), y si las reglas no son las del
+    /// año elegido.
+    fn datos(&self, comunidad: &str, ctx: &Ctx, w: u16) -> Vec<Line<'static>> {
+        let mut v = repartir(self.campos(comunidad), w as usize);
+        if let Some((c, _)) = crate::informe::empleo::comunidad(&ctx.datos, ctx.anio).filter(|(c, _)| crate::hacienda::irpf::reglas(self.anio, c).autonomica.is_none()) {
+            v.push(Line::styled(format!("{}: la app no tiene su IRPF", nombre_comunidad(c)), Style::new().fg(tema::AVISO)));
+        }
+        if let Some(n) = self.nota_reglas() {
+            v.push(Line::styled(n, gris()));
+        }
+        v
     }
 
-    fn kpis(f: &mut Frame, area: Rect, c: &[(String, String, String, Style)]) {
-        let zonas = Layout::horizontal(vec![Constraint::Ratio(1, c.len() as u32); c.len()]).split(area);
-        for ((etq, v, nota, st), z) in c.iter().zip(zonas.iter()) {
-            kpi(f, *z, etq, v, nota, *st);
+    /// Lo importante: lo que te queda al mes, en una banda (y, a la derecha si cabe, al año). Con 14 pagas, debajo,
+    /// lo que sale en 12 (el neto del año entre 12: otras calculadoras lo dan así). Devuelve las filas usadas.
+    fn pintar_banda(&self, f: &mut Frame, area: Rect, c: &Cuenta, fin: u16) -> u16 {
+        let verde = negrita().fg(tema::BIEN);
+        let (etiqueta, al_mes, al_anio) = match c {
+            Cuenta::Asalariado(s) => (format!("te queda al mes, en {} pagas", self.pagas), s.neto / self.pagas as f64, s.neto),
+            Cuenta::Autonomo(a) => ("te queda al mes".to_string(), a.neto / 12.0, a.neto),
+        };
+        let fondo = Rect { width: (fin + 2).min(area.width), height: ALTO_BANDA.min(area.height), ..area };
+        banda(f, fondo, tema::SUAVE_BIEN, en_banda(&etiqueta, eur(al_mes), verde, fin));
+        let lado = nota(&[(&eur(al_anio), true), (" al año", false)]);
+        let x = fondo.right() + 3;
+        if area.height >= 2 && x + lado.width() as u16 <= area.right() {
+            f.render_widget(Paragraph::new(lado), Rect { x, y: area.y + 1, width: area.right() - x, height: 1 });
+        }
+        let mut alto = fondo.height;
+        if let Cuenta::Asalariado(s) = c
+            && self.pagas == 14
+            && area.height > alto
+        {
+            let l = guia(Line::from(vec![Span::raw("  "), Span::styled("en 12 pagas serían", gris())]), eur(s.neto / 12.0), Style::new(), fin);
+            f.render_widget(Paragraph::new(l), Rect { y: area.y + alto, height: 1, ..area });
+            alto += 1;
+        }
+        alto
+    }
+
+    /// El reparto, con una barra fina y una línea por tramo: de lo que le cuestas a tu empresa (o de lo que ganas,
+    /// en autónomo), lo que te queda, la Seguridad Social (o tu cuota) y el IRPF; y lo que te quitan.
+    fn reparto(&self, c: &Cuenta, fin: u16, ancho: u16) -> Vec<Line<'static>> {
+        let n = Style::new();
+        let mut v = Vec::new();
+        match c {
+            Cuenta::Asalariado(s) => {
+                v.extend(con_nota(guia("coste para tu empresa", eur(s.coste), n, fin), nota(&[("tu bruto, ", false), (&eur(s.bruto), true), (", y lo que pone la empresa", false)]), ancho));
+                v.push(barra(&[(s.neto, QUEDA), (s.ss_trabajador, SS), (s.irpf.total, IRPF), (s.ss_empresa, EMPRESA)], fin));
+                v.push(tramo(QUEDA, "te queda", s.neto, n, fin));
+                v.push(tramo(SS, "tu Seguridad Social", s.ss_trabajador, n, fin));
+                v.extend(con_nota(tramo(IRPF, "IRPF", s.irpf.total, n, fin), nota(&[("con la Seguridad Social, te quitan ", false), (&eur(s.ss_trabajador + s.irpf.total), true)]), ancho));
+                v.push(tramo(EMPRESA, "Seg. Social de la empresa", s.ss_empresa, n, fin));
+            }
+            Cuenta::Autonomo(a) => {
+                v.extend(con_nota(guia("lo que ganas", eur(a.antes()), n, fin), nota(&[("lo que facturas menos tus gastos", false)]), ancho));
+                v.push(barra(&[(a.neto, QUEDA), (a.ss, SS), (a.irpf.total, IRPF)], fin));
+                v.push(tramo(QUEDA, "te queda", a.neto, n, fin));
+                v.extend(con_nota(tramo(SS, "tu cuota de autónomo", a.ss, n, fin), nota(&[(&eur(a.ss / 12.0), true), (&format!(" al mes · tramo {} · base {}", a.tramo, eur(a.base)), false)]), ancho));
+                v.extend(con_nota(tramo(IRPF, "IRPF", a.irpf.total, n, fin), nota(&[("con la cuota, te quitan ", false), (&eur(a.impuestos()), true)]), ancho));
+            }
+        }
+        v
+    }
+
+    /// Lo que te queda en cada comunidad y cuánto más o menos que en la elegida, sin caja: la cabecera en gris y la
+    /// elegida en el fondo suave de la sección.
+    fn pintar_comunidades(&mut self, f: &mut Frame, area: Rect, v: &[EnComunidad], sel: usize, ctx: &Ctx) {
+        let tuya = crate::informe::empleo::comunidad(&ctx.datos, ctx.anio).map(|c| c.0);
+        let elegida = &v[sel];
+        let al_mes = match self.pestana {
+            Pestana::Asalariado => self.pagas as f64,
+            Pestana::Autonomo => 12.0,
+        };
+        let titulo = Rect { height: area.height.min(1), ..area };
+        f.render_widget(Paragraph::new(titulo_bloque("te queda en cada comunidad")), titulo);
+        let teclas = Line::from(atajo("↑↓", "elegir otra").to_vec());
+        if 26 + 5 + teclas.width() <= area.width as usize {
+            f.render_widget(Paragraph::new(teclas.right_aligned()), titulo);
+        }
+        let filas: Vec<Row> = v
+            .iter()
+            .map(|c| {
+                let nombre = if Some(c.clave) == tuya { Line::from(vec![Span::raw(c.nombre), Span::styled(" · tuya", gris())]) } else { Line::from(c.nombre) };
+                let dif = if c.clave == elegida.clave { Span::raw("") } else { Span::styled(diferencia(c.neto - elegida.neto), gris()) };
+                Row::new([Cell::from(nombre), Cell::from(derecha(eur0(c.neto / al_mes))), Cell::from(derecha(eur0(c.neto))), Cell::from(derecha(eur0(c.irpf))), Cell::from(Line::from(dif).right_aligned())])
+            })
+            .collect();
+        let cab = Row::new([Cell::from("comunidad"), Cell::from(derecha("al mes")), Cell::from(derecha("al año")), Cell::from(derecha("IRPF")), Cell::from(derecha("diferencia"))]).style(tema::cabecera_tabla());
+        let anchos = [Constraint::Fill(1), Constraint::Length(9), Constraint::Length(10), Constraint::Length(9), Constraint::Length(10)];
+        let tabla = Table::new(filas, anchos).header(cab).column_spacing(2).row_highlight_style(tema::seleccion());
+        self.tabla.select(Some(sel));
+        let lista = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
+        f.render_stateful_widget(tabla, lista, &mut self.tabla);
+    }
+
+    /// Si las reglas del IRPF o de la Seguridad Social no son las del año elegido, de cuál son.
+    fn nota_reglas(&self) -> Option<String> {
+        let (ss, irpf) = match self.cuenta("") {
+            Cuenta::Asalariado(s) => (s.anio_ss, s.anio_irpf),
+            Cuenta::Autonomo(a) => (a.anio_ss, a.anio_irpf),
+        };
+        match (ss == self.anio, irpf == self.anio) {
+            (true, true) => None,
+            (true, false) => Some(format!("IRPF con las reglas de {irpf}: las de {} aún no están", self.anio)),
+            _ => Some(format!("Seguridad Social de {ss} e IRPF de {irpf}: las de {} aún no están", self.anio)),
         }
     }
+
+    /// El detalle, concepto a concepto, en la comunidad elegida: con puntos guía y, delante de lo que va a cada
+    /// sitio, el «█» de su color en el reparto. Se baja con ↑↓.
+    fn pintar_detalle(&mut self, f: &mut Frame, area: Rect, c: &Cuenta, nombre: &str) {
+        let w = area.width.min(100) as usize;
+        let lineas = match c {
+            Cuenta::Asalariado(s) => lineas_asalariado(s, self.pagas, w),
+            Cuenta::Autonomo(a) => lineas_autonomo(a, w),
+        };
+        let alto = area.height.saturating_sub(1);
+        let max = (lineas.len() as u16).saturating_sub(alto);
+        self.scroll = self.scroll.min(max);
+        let titulo = Rect { height: area.height.min(1), ..area };
+        f.render_widget(Paragraph::new(titulo_bloque(format!("el detalle · {nombre}"))), titulo);
+        if max > 0 {
+            let mas = if self.scroll >= max { "↑ más arriba" } else { "↓ más abajo" };
+            f.render_widget(Paragraph::new(Line::styled(mas, gris()).right_aligned()), titulo);
+        }
+        let cuerpo = Rect { y: area.y + 1, height: alto, ..area };
+        f.render_widget(Paragraph::new(lineas).scroll((self.scroll, 0)), cuerpo);
+    }
 }
 
-/* ---------------- asalariado ---------------- */
+/* ---------------- el detalle ---------------- */
 
-/// Lo que se va de tu bruto: tu Seguridad Social y el IRPF.
-fn de_tu_bruto(s: &Asalariado) -> f64 {
-    fmt::r2(s.bruto - s.neto)
+const SIN_COMUNIDADES: &str = "Sin País Vasco ni Navarra (con su propio IRPF) ni Ceuta y Melilla (con su deducción): la app no los calcula.";
+
+/// Las líneas del detalle, con las cifras acabando en la misma columna (puntos guía).
+struct Recibo {
+    fin: u16,
+    w: usize,
+    lineas: Vec<Line<'static>>,
 }
 
-fn cifras_asalariado(s: &Asalariado, pagas: u32) -> Vec<(String, String, String, Style)> {
-    let mal = Style::new().fg(tema::MAL);
-    vec![
-        ("Paga tu empresa".into(), eur(s.coste), "al año".into(), Style::new()),
-        ("Tu bruto".into(), eur(s.bruto), format!("{} × {pagas}", eur(s.bruto / pagas as f64)), Style::new()),
-        ("Te queda".into(), eur(s.neto), format!("{} × {pagas}", eur(s.neto / pagas as f64)), Style::new().fg(tema::BIEN)),
-        ("Del total".into(), de(s.impuestos(), s.coste), "impuestos y SS".into(), mal),
-        ("De tu bruto".into(), de(de_tu_bruto(s), s.bruto), "tu SS e IRPF".into(), mal),
-    ]
+impl Recibo {
+    fn new(w: usize) -> Recibo {
+        Recibo { fin: w.min(76) as u16, w, lineas: Vec::new() }
+    }
+
+    /// Un paso de la cuenta: «= Tu sueldo bruto ······ 30.000,00 €». Con `color`, el «█» de su tramo delante.
+    fn paso(&mut self, color: Option<Color>, et: &str, st: Style, x: f64, signo: &str) {
+        let etiqueta = match color {
+            Some(c) => Line::from(vec![muestra(c), Span::styled(et.trim_start().to_string(), st)]),
+            None => Line::from(Span::styled(et.to_string(), st)),
+        };
+        self.lineas.push(guia(etiqueta, format!("{signo}{}", importe(x)), st, self.fin));
+    }
+
+    /// Un concepto de lo cotizado, en gris y más adentro (sin negrita: es el detalle del paso).
+    fn concepto(&mut self, et: &str, x: f64) {
+        let mut l = guia(Span::styled(format!("      {et}"), gris()), importe(x), gris(), self.fin);
+        if let Some(s) = l.spans.last_mut() {
+            s.style = gris();
+        }
+        self.lineas.push(l);
+    }
+
+    /// Las líneas de lo cotizado por conceptos, cada una con su tipo.
+    fn conceptos(&mut self, v: &[Concepto]) {
+        for c in v.iter().filter(|c| c.importe.abs() > DIF) {
+            let et = match c.tipo {
+                Some(t) => format!("{} · {}", c.nombre, tipo(t)),
+                None => c.nombre.clone(),
+            };
+            self.concepto(&et, c.importe);
+        }
+    }
+
+    /// Una nota en gris bajo un paso.
+    fn nota(&mut self, t: String) {
+        self.lineas.extend(envolver(&[(t, gris())], self.w, 4));
+    }
+
+    /// Las notas del final, cada una con «• » delante.
+    fn vinetas(mut self, notas: Vec<String>) -> Vec<Line<'static>> {
+        self.lineas.push(Line::from(""));
+        for t in notas {
+            let mut l = envolver(&[(t, gris())], self.w, 2);
+            if let Some(s) = l.first_mut().and_then(|p| p.spans.first_mut()) {
+                *s = Span::styled("• ", gris());
+            }
+            self.lineas.extend(l);
+        }
+        self.lineas
+    }
 }
 
-fn lineas_asalariado(s: &Asalariado, pagas: u32, anio: i32, w: usize) -> Vec<Line<'static>> {
-    let ss = Style::new().fg(tema::AVISO);
-    let ir = Style::new().fg(tema::MAL);
-    let mut p = Pasos::new(w);
-    p.lineas.push(Line::styled(format!("De lo que paga tu empresa a lo que te queda, en {anio}"), tema::titulo()));
-    p.paso("Lo que le cuestas a tu empresa", negrita(), s.coste, "");
-    p.paso("  − Seguridad Social que paga tu empresa", ss, s.ss_empresa, "−");
-    conceptos(&mut p, &s.empresa);
-    p.paso("= Tu sueldo bruto", negrita(), s.bruto, "");
-    p.paso("  − Tu Seguridad Social", ss, s.ss_trabajador, "−");
-    conceptos(&mut p, &s.trabajador);
-    p.paso("  − IRPF", ir, s.irpf.total, "−");
-    let medio = if s.bruto > DIF { pct1(s.irpf.total / s.bruto * 100.0) } else { "—".into() };
+fn lineas_asalariado(s: &Asalariado, pagas: u32, w: usize) -> Vec<Line<'static>> {
+    let n = Style::new();
+    let mut p = Recibo::new(w);
+    p.paso(None, "Lo que le cuestas a tu empresa", negrita(), s.coste, "");
+    p.paso(Some(EMPRESA), "  − Seguridad Social que paga tu empresa", n, s.ss_empresa, "−");
+    p.conceptos(&s.empresa);
+    p.paso(None, "= Tu sueldo bruto", negrita(), s.bruto, "");
+    p.paso(Some(SS), "  − Tu Seguridad Social", n, s.ss_trabajador, "−");
+    p.conceptos(&s.trabajador);
+    p.paso(Some(IRPF), "  − IRPF", n, s.irpf.total, "−");
     let mut t = format!("base {} · estatal {} · autonómica {}", eur(s.irpf.base), eur(s.irpf.estatal), eur(s.irpf.autonomica));
     if s.irpf.deduccion > DIF {
         t += &format!(" · deducción por sueldo bajo {}", eur(s.irpf.deduccion));
     }
-    p.nota(format!("{t} · el {medio} de tu bruto"), w);
-    p.paso("= Te queda", negrita().fg(tema::BIEN), s.neto, "");
-    let otras = if pagas == 14 { 12 } else { 14 };
-    p.nota(format!("al mes: {} en {pagas} pagas (o {} en {otras})", eur(s.neto / pagas as f64), eur(s.neto / otras as f64)), w);
-    let mut l = p.lineas;
-    l.push(Line::from(""));
-    let total = format!(
-        "Impuestos y cotizaciones: {}, el {} de lo que le cuestas a tu empresa. De tu bruto se van {} (tu Seguridad Social y el IRPF): el {}.",
-        eur(s.impuestos()),
-        de(s.impuestos(), s.coste),
-        eur(de_tu_bruto(s)),
-        de(de_tu_bruto(s), s.bruto)
-    );
-    l.extend(crate::tui::texto::envolver(&[(total, negrita())], w, 0));
-    l.push(Line::from(""));
+    p.nota(format!("{t} · el {} de tu bruto", de(s.irpf.total, s.bruto)));
+    p.nota(format!("con tu Seguridad Social, te quitan {}", eur(s.ss_trabajador + s.irpf.total)));
+    p.paso(Some(QUEDA), "= Te queda", negrita().fg(tema::BIEN), s.neto, "");
+    // Con 14 pagas, también lo que sale en 12 (el neto del año entre 12), que es como lo dan otras calculadoras.
+    let en_12 = if pagas == 14 { format!(" · {} en 12 pagas", eur(s.neto / 12.0)) } else { String::new() };
+    p.nota(format!("al mes: {} en {pagas} pagas{en_12}", eur(s.neto / pagas as f64)));
     let g = reglas::general(s.anio_ss);
-    let mut notas = vec![cuales(s.anio_ss, s.anio_irpf, anio, g.norma)];
+    let mut notas = vec![format!("Cotizaciones con las reglas de {} ({}); IRPF con las de {}.", s.anio_ss, g.norma, s.anio_irpf)];
     if s.tope {
-        notas.push(format!(
-            "Tu sueldo pasa de la base máxima ({} al mes): por encima solo se paga la cotización de solidaridad (desde 2025), por tramos y repartida como las contingencias comunes.",
-            eur(g.base_maxima)
-        ));
-    } else {
-        notas.push(format!("Se cotiza por todo tu sueldo hasta {} al mes (la base máxima); por encima, solo la cotización de solidaridad.", eur(g.base_maxima)));
+        notas.push(format!("Tu sueldo pasa de la base máxima ({} al mes): por encima solo se paga la cotización de solidaridad.", eur(g.base_maxima)));
     }
-    notas.push(format!("Accidentes de trabajo: el {} de un trabajo de oficina; en otras actividades es más (lo paga solo la empresa).", tipo(reglas::AT_EP_OFICINA)));
-    notas.push("El IRPF es el que te toca en la Renta, sin hijos ni discapacidad y sin otras rentas; lo que te retienen cada mes se le parece, pero no es igual.".into());
-    if s.sin_comunidad {
-        notas.push("Sin comunidad (o con una que la app no tiene), la escala estatal hace también de autonómica: es una aproximación.".into());
-    }
-    notas.push("Las cotizaciones no son impuestos: dan derecho a pensión, paro y bajas; aun así, se cuentan con ellos.".into());
-    l.extend(vinetas(notas.into_iter().map(|n| (n, gris())).collect(), w));
-    l
+    notas.push(format!("Accidentes de trabajo: el {} de un trabajo de oficina (lo paga la empresa).", tipo(reglas::AT_EP_OFICINA)));
+    notas.push("El IRPF es el que te toca en la Renta, sin hijos ni otras rentas; lo que te retienen cada mes se le parece.".into());
+    notas.push(SIN_COMUNIDADES.into());
+    p.vinetas(notas)
 }
 
-/// De qué año son las reglas, si no son las del año elegido.
-fn cuales(ss: i32, irpf: i32, anio: i32, norma: &str) -> String {
-    let mut t = format!("Cotizaciones con las reglas de {ss} ({norma})");
-    if ss != anio {
-        t += &format!(", que son las más cercanas a {anio} que tiene la app");
-    }
-    t += &format!("; IRPF con las de {irpf}");
-    if irpf != anio {
-        t += &format!(" (las de {anio} aún no las tiene la app)");
-    }
-    t + "."
-}
-
-/* ---------------- autónomo ---------------- */
-
-fn cifras_autonomo(a: &Autonomo) -> Vec<(String, String, String, Style)> {
-    let mal = Style::new().fg(tema::MAL);
-    vec![
-        ("Facturas".into(), eur(a.facturado), "al año, sin IVA".into(), Style::new()),
-        ("Tu cuota".into(), eur(a.ss), format!("{} × 12", eur(a.ss / 12.0)), Style::new().fg(tema::AVISO)),
-        ("Te queda".into(), eur(a.neto), format!("{} × 12", eur(a.neto / 12.0)), Style::new().fg(tema::BIEN)),
-        ("De lo que ganas".into(), de(a.impuestos(), a.antes()), "cuota e IRPF".into(), mal),
-        ("De lo facturado".into(), de(a.impuestos(), a.facturado), "cuota e IRPF".into(), mal),
-    ]
-}
-
-fn lineas_autonomo(a: &Autonomo, anio: i32, w: usize) -> Vec<Line<'static>> {
-    let ss = Style::new().fg(tema::AVISO);
-    let ir = Style::new().fg(tema::MAL);
-    let mut p = Pasos::new(w);
-    p.lineas.push(Line::styled(format!("De lo que facturas a lo que te queda, en {anio}"), tema::titulo()));
-    p.paso("Lo que facturas (sin IVA)", negrita(), a.facturado, "");
+fn lineas_autonomo(a: &Autonomo, w: usize) -> Vec<Line<'static>> {
+    let n = Style::new();
+    let mut p = Recibo::new(w);
+    p.paso(None, "Lo que facturas (sin IVA)", negrita(), a.facturado, "");
     if a.gastos > DIF {
-        p.paso("  − Gastos de tu actividad", gris(), a.gastos, "−");
-        p.paso("= Lo que ganas", negrita(), a.antes(), "");
+        p.paso(None, "  − Gastos de tu actividad", gris(), a.gastos, "−");
+        p.paso(None, "= Lo que ganas", negrita(), a.antes(), "");
     }
-    p.paso("  − Tu cuota de autónomo", ss, a.ss, "−");
-    p.nota(
-        format!(
-            "tramo {}: ganas {} al mes (con el {} de gastos genéricos) → base mínima {} × {}",
-            a.tramo,
-            eur(a.mensual_ss),
-            tipo(a.gastos_genericos),
-            eur(a.base),
-            tipo(a.tipo)
-        ),
-        w,
-    );
-    conceptos(&mut p, &a.cuota);
-    p.paso("  − IRPF", ir, a.irpf.total, "−");
+    p.paso(Some(SS), "  − Tu cuota de autónomo", n, a.ss, "−");
+    p.nota(format!("tramo {}: ganas {} al mes (con el {} de gastos genéricos) → base mínima {} × {} · tu cuota, {} al mes", a.tramo, eur(a.mensual_ss), tipo(a.gastos_genericos), eur(a.base), tipo(a.tipo), eur(a.ss / 12.0)));
+    p.conceptos(&a.cuota);
+    p.paso(Some(IRPF), "  − IRPF", n, a.irpf.total, "−");
     let mut t = format!("rendimiento {}", importe(a.rendimiento));
     if a.gdj > DIF {
         t += &format!(" − difícil justificación {}", eur(a.gdj));
@@ -322,30 +513,17 @@ fn lineas_autonomo(a: &Autonomo, anio: i32, w: usize) -> Vec<Line<'static>> {
     if a.reduccion > DIF {
         t += &format!(" − reducción por rentas bajas {}", eur(a.reduccion));
     }
-    let medio = de(a.irpf.total, a.antes());
-    p.nota(format!("{t} = base {} · el {medio} de lo que ganas", eur(a.irpf.base)), w);
-    p.paso("= Te queda", negrita().fg(tema::BIEN), a.neto, "");
-    p.nota(format!("al mes: {}", eur(a.neto / 12.0)), w);
-    let mut l = p.lineas;
-    l.push(Line::from(""));
-    let total = format!(
-        "Impuestos y cotizaciones: {}, el {} de lo que ganas (lo facturado menos los gastos) y el {} de lo que facturas.",
-        eur(a.impuestos()),
-        de(a.impuestos(), a.antes()),
-        de(a.impuestos(), a.facturado)
-    );
-    l.extend(crate::tui::texto::envolver(&[(total, negrita())], w, 0));
-    l.push(Line::from(""));
-    let mut notas = vec![cuales(a.anio_ss, a.anio_irpf, anio, a.norma)];
-    notas.push("La cuota, con la base mínima de tu tramo todo el año (puedes elegir una más alta) y sin tarifa plana ni otras bonificaciones; como persona física, no societario.".into());
-    notas.push("El IVA no cuenta: lo cobras a tus clientes y se lo pasas a Hacienda.".into());
-    notas.push("IRPF en estimación directa simplificada, sin otras rentas. Lo que adelantas en el 130 y lo que te retienen tus clientes se descuenta en la Renta: no es más impuesto.".into());
-    if a.sin_comunidad {
-        notas.push("Sin comunidad (o con una que la app no tiene), la escala estatal hace también de autonómica: es una aproximación.".into());
-    }
-    notas.push("Las cotizaciones no son impuestos: dan derecho a pensión, paro y bajas; aun así, se cuentan con ellos.".into());
-    l.extend(vinetas(notas.into_iter().map(|n| (n, gris())).collect(), w));
-    l
+    p.nota(format!("{t} = base {} · el {} de lo que ganas", eur(a.irpf.base), de(a.irpf.total, a.antes())));
+    p.nota(format!("con la cuota, te quitan {}", eur(a.impuestos())));
+    p.paso(Some(QUEDA), "= Te queda", negrita().fg(tema::BIEN), a.neto, "");
+    p.nota(format!("al mes: {}", eur(a.neto / 12.0)));
+    let notas = vec![
+        format!("Cotizaciones con las reglas de {} ({}); IRPF con las de {}.", a.anio_ss, a.norma, a.anio_irpf),
+        "La cuota, con la base mínima de tu tramo y sin tarifa plana; el IVA no cuenta (se lo pasas a Hacienda).".into(),
+        "IRPF en estimación directa simplificada, sin otras rentas: lo del 130 y las retenciones se descuentan en la Renta.".into(),
+        SIN_COMUNIDADES.into(),
+    ];
+    p.vinetas(notas)
 }
 
 impl Pantalla for Calculadora {
@@ -353,46 +531,35 @@ impl Pantalla for Calculadora {
         "Calcula tu sueldo"
     }
 
-    fn tecla_menu(&self) -> Option<char> {
-        Some('C')
-    }
-
+    /// Arriba, las pestañas y los datos; luego lo que te queda al mes, en una banda; el reparto (si cabe) y, debajo,
+    /// las comunidades o el detalle (`d`).
     fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
-        let anio = self.anio;
-        let com = self.comunidad(ctx);
-        let grande = area.height >= 24;
-        // «Tus datos», con las líneas que haga falta para no partir ninguno.
-        let ancho_datos = area.width.saturating_sub(4) as usize;
-        let alto_datos = repartir(self.campos(ctx), ancho_datos).len() as u16 + 2;
-        let [a_pest, a_datos, a_kpi, a_cuerpo] =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(alto_datos), Constraint::Length(if grande { 5 } else { 0 }), Constraint::Min(0)]).areas(area);
-        f.render_widget(Paragraph::new(self.pestanas()), a_pest);
-        self.pintar_datos(f, a_datos, ctx);
-        let b = bloque("Calculadora de sueldos");
-        let dentro = b.inner(a_cuerpo);
-        let w = (dentro.width as usize).min(100);
-        let (cifras, lineas) = match self.pestana {
-            Pestana::Asalariado => {
-                let s = asalariado(self.bruto, self.temporal, &com, anio);
-                (cifras_asalariado(&s, self.pagas), lineas_asalariado(&s, self.pagas, anio, w))
-            }
-            Pestana::Autonomo => {
-                let a = autonomo(self.facturado, self.gastos, &com, anio);
-                (cifras_autonomo(&a), lineas_autonomo(&a, anio, w))
-            }
-        };
-        if grande {
-            Self::kpis(f, a_kpi, &cifras);
-        }
-        self.scroll_max = (lineas.len() as u16).saturating_sub(dentro.height);
-        self.scroll = self.scroll.min(self.scroll_max);
-        let b = if self.scroll_max > 0 {
-            let t = if self.scroll >= self.scroll_max { " ↑ más arriba " } else { " ↓ más abajo (↑↓) " };
-            b.title_bottom(Line::styled(t, gris()).right_aligned())
+        let v = self.comunidades();
+        let sel = self.elegida(&v, ctx);
+        let cuenta = self.cuenta(v[sel].clave);
+        let fila = |y: u16, alto: u16| Rect { y, height: alto.min(area.bottom().saturating_sub(y)), ..area };
+        let mut y = area.y;
+        self.pintar_pestanas(f, fila(y, 1));
+        y += 2;
+        let datos = self.datos(v[sel].nombre, ctx, area.width);
+        let alto_datos = datos.len() as u16;
+        f.render_widget(Paragraph::new(datos), fila(y, alto_datos));
+        y += alto_datos + 1;
+        // Las cifras del reparto (y la de la banda) acaban en la misma columna.
+        let fin = 46.min(area.width);
+        y += self.pintar_banda(f, fila(y, area.bottom().saturating_sub(y)), &cuenta, fin) + 1;
+        if self.detalle {
+            self.pintar_detalle(f, fila(y, area.bottom().saturating_sub(y)), &cuenta, v[sel].nombre);
         } else {
-            b
-        };
-        f.render_widget(Paragraph::new(lineas).scroll((self.scroll, 0)).block(b), a_cuerpo);
+            // El reparto, si deja sitio para unas cuantas comunidades (si no, está en el detalle).
+            let reparto = self.reparto(&cuenta, fin, area.width);
+            let alto = reparto.len() as u16;
+            if area.bottom().saturating_sub(y) >= alto + 1 + 8 {
+                f.render_widget(Paragraph::new(reparto), fila(y, alto));
+                y += alto + 1;
+            }
+            self.pintar_comunidades(f, fila(y, area.bottom().saturating_sub(y)), &v, sel, ctx);
+        }
         if let Some(fm) = &self.form {
             fm.dibujar_ventana(f, area, 64);
         }
@@ -415,12 +582,25 @@ impl Pantalla for Calculadora {
                 self.pestana = if self.pestana == Pestana::Asalariado { Pestana::Autonomo } else { Pestana::Asalariado };
                 self.scroll = 0;
             }
-            KeyCode::Enter => self.form = Some(self.formulario(ctx)),
-            KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
-            KeyCode::Down => self.scroll = self.scroll.saturating_add(1),
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
-            KeyCode::Home => self.scroll = 0,
+            KeyCode::Enter => self.form = Some(self.formulario()),
+            KeyCode::Char('d') => {
+                self.detalle = !self.detalle;
+                self.scroll = 0;
+            }
+            KeyCode::Esc if self.detalle => self.detalle = false,
+            KeyCode::Up | KeyCode::PageUp if self.detalle => self.scroll = self.scroll.saturating_sub(if k.code == KeyCode::Up { 1 } else { 10 }),
+            KeyCode::Down | KeyCode::PageDown if self.detalle => self.scroll = self.scroll.saturating_add(if k.code == KeyCode::Down { 1 } else { 10 }),
+            KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End => {
+                let v = self.comunidades();
+                let i = self.elegida(&v, ctx);
+                let j = match k.code {
+                    KeyCode::Up => i.saturating_sub(1),
+                    KeyCode::Down => (i + 1).min(v.len() - 1),
+                    KeyCode::Home => 0,
+                    _ => v.len() - 1,
+                };
+                self.comunidad = Some(v[j].clave.to_string());
+            }
             _ => return false,
         }
         true
@@ -430,15 +610,58 @@ impl Pantalla for Calculadora {
         if self.form.is_some() {
             return vec![("Tab ↓", "siguiente"), ("← →", "elegir"), ("Ctrl+S", "calcular"), ("Esc", "cancelar")];
         }
-        vec![("← →", if self.pestana == Pestana::Asalariado { "autónomo" } else { "asalariado" }), ("Enter", "cambiar los datos"), ("↑↓", "bajar")]
+        let otra = if self.pestana == Pestana::Asalariado { "autónomo" } else { "asalariado" };
+        if self.detalle {
+            return vec![("↑↓", "bajar"), ("Esc", "volver"), ("← →", otra)];
+        }
+        vec![("↑↓", "comunidad"), ("Enter", "cambiar"), ("d", "detalle"), ("← →", otra)]
     }
 
     fn capturando(&self) -> bool {
         self.form.is_some()
     }
 
-    /// Tiene su propio año (en «Tus datos»): el de arriba no cuenta.
+    /// Tiene su propio año (en «Tu sueldo»): el de arriba no cuenta.
     fn usa_anio(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dominio::fmt::{anio_actual, eur};
+    use crate::informe::calculadora::asalariado_por_comunidad;
+    use crate::tui::prueba::{app_con, cargar, caso, ir, pantalla, teclas};
+
+    /// Con ↑↓ se elige otra comunidad (sale en los datos y lo que te queda es lo suyo); si la tuya no la tiene la
+    /// app, se dice. Con 14 pagas, también se ve lo que sale en 12.
+    #[test]
+    fn otra_comunidad() {
+        let dir = caso("a-de-todo");
+        let mut d = cargar(&dir);
+        for r in d.lecturas.rentas.values_mut() {
+            r.comunidad = "navarra".into();
+        }
+        d.lecturas.rentas.entry(2025).or_default().comunidad = "navarra".into();
+        let mut a = app_con(d, &dir);
+        ir(&mut a, "Calcula tu sueldo");
+        let v = asalariado_por_comunidad(30000.0, false, anio_actual());
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("Navarra (régimen foral): la app no tiene su IRPF"), "{p}");
+        assert!(p.contains(&format!("año {}   {}", anio_actual(), v[0].nombre)), "sin la tuya, la primera:\n{p}");
+        teclas(&mut a, "<down>");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains(&format!("año {}   {}", anio_actual(), v[1].nombre)), "{p}");
+        assert!(p.contains(&format!("{} al año", eur(v[1].neto))), "lo de la elegida:\n{p}");
+        assert!(p.contains("en 12 pagas serían ") && p.contains(&eur(v[1].neto / 12.0)), "en 12 pagas:\n{p}");
+        // El detalle, de la elegida; Esc vuelve a las comunidades.
+        teclas(&mut a, "d");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains(&format!("el detalle · {}", v[1].nombre)), "{p}");
+        teclas(&mut a, "<pgdn>");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains(&format!("en 14 pagas · {} en 12 pagas", eur(v[1].neto / 12.0))), "más abajo, también en 12 pagas:\n{p}");
+        teclas(&mut a, "<esc>");
+        assert!(pantalla(&mut a, 120, 36).contains("te queda en cada comunidad"));
     }
 }

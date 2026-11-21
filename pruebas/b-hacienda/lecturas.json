@@ -1,0 +1,64 @@
+{
+ "rentas": {
+  "2025": {
+   "v": 1
+  }
+ },
+ "formularios": {
+  "2024-2T-303": {
+   "casillas": {
+    "71": -200,
+    "87": 10
+   },
+   "tipo": "D",
+   "pdf": "x.pdf",
+   "justificante": "3030000000001"
+  },
+  "2024-3T-303": {
+   "casillas": {
+    "71": -80,
+    "87": 5
+   },
+   "tipo": "",
+   "pdf": "",
+   "justificante": ""
+  },
+  "2024-1T-130": {
+   "casillas": {
+    "7": 1000,
+    "15": 20,
+    "16": 100,
+    "19": -50
+   },
+   "tipo": "U",
+   "pdf": "",
+   "justificante": ""
+  },
+  "2025-1T-130": {
+   "casillas": {
+    "1": 800,
+    "7": -120,
+    "19": -120
+   },
+   "tipo": "N",
+   "pdf": "",
+   "justificante": ""
+  },
+  "2025-3T-303": {
+   "casillas": {
+    "71": -10,
+    "87": 0
+   },
+   "tipo": "C",
+   "pdf": "",
+   "justificante": ""
+  },
+  "2025-4T-303": {
+   "casillas": {},
+   "tipo": "",
+   "pdf": "",
+   "justificante": ""
+  }
+ },
+ "fallos": {}
+}

@@ -599,7 +599,7 @@ mod tests {
     use super::*;
 
     fn nomina(anio: i32, empresa: &str, mes: u32, v: [f64; 4]) -> Nomina {
-        Nomina { id: format!("{empresa}{mes}"), anio, empresa: empresa.into(), mes, dinerario: v[0], especie: v[1], retenciones: v[2], ss: v[3] }
+        Nomina { id: format!("{empresa}{mes}"), anio, empresa: empresa.into(), mes, dinerario: v[0], especie: v[1], retenciones: v[2], ss: v[3], ..Default::default() }
     }
 
     #[test]

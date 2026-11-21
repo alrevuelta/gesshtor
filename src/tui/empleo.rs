@@ -3,13 +3,16 @@
 //! - `empleo_sueldo`: el año (de tu Renta, tus nóminas o la Seguridad Social), si te retienen bien y mes a mes; con
 //!   el detalle de cada mes (`empleo_mes`).
 //! - `empleo_nominas`: las nóminas apuntadas, una por mes, en cualquier año desde 2020.
+//!
+//! Estilo C2: sin cajas, lo que te llega en una banda, el resto con puntos guía y las tablas con la cabecera en gris
+//! y las cifras a la derecha (sin «€»: ya lo dicen las guías).
 
 use crate::informe::empleo::{empleo_anio, EmpleoAnio};
 use crate::tui::widgets::tema;
 use crate::tui::texto::partir;
 use crate::tui::{Ctx, Pantalla};
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 use super::{empleo_nominas as nominas, empleo_sueldo as sueldo};
@@ -66,7 +69,7 @@ pub(super) fn con_importes(s: &str, w: usize, estilo: Style) -> Vec<Line<'static
                 if i > 0 {
                     v.push(Span::styled(" ", estilo));
                 }
-                let st = if p.contains('\u{a0}') { estilo.add_modifier(ratatui::style::Modifier::BOLD) } else { estilo };
+                let st = if p.contains('\u{a0}') { estilo.add_modifier(Modifier::BOLD) } else { estilo };
                 v.push(Span::styled(p.replace('\u{a0}', " "), st));
             }
             Line::from(v)
@@ -74,18 +77,36 @@ pub(super) fn con_importes(s: &str, w: usize, estilo: Style) -> Vec<Line<'static
         .collect()
 }
 
-/// Una fila de un panel: un texto a la izquierda y, si hay, columnas alineadas a la derecha. Se pintan por
-/// separado y solo las filas que se ven, sin los espacios de en medio (pintar cuesta por carácter).
+/// La línea de una banda (`widgets::banda`): la etiqueta, con dos de aire delante, y la cifra acabando justo antes de
+/// la columna `fin` (como las de `guia` con el mismo `fin`), las dos en negrita y en `color`. Sin puntos.
+pub(super) fn en_banda(etiqueta: &str, cifra: String, color: Color, fin: u16) -> Line<'static> {
+    let st = Style::new().fg(color).add_modifier(Modifier::BOLD);
+    let hueco = (fin as usize).saturating_sub(2 + etiqueta.chars().count() + cifra.chars().count()).max(1);
+    Line::from(vec![Span::raw("  "), Span::styled(etiqueta.to_string(), st), Span::raw(" ".repeat(hueco)), Span::styled(cifra, st)])
+}
+
+/// Una fila de un panel: un texto a la izquierda y, si hay, columnas alineadas a la derecha de las `ancho` primeras
+/// columnas (0: de todo el panel), con un fondo si lo lleva (el de una banda). Se pintan por separado y solo las
+/// filas que se ven, sin los espacios de en medio (pintar cuesta por carácter).
 #[derive(Debug, Clone, Default)]
 pub(super) struct Fila {
     izq: Line<'static>,
     der: Option<Line<'static>>,
+    ancho: u16,
+    fondo: Option<Color>,
 }
 
 impl From<Line<'static>> for Fila {
     fn from(izq: Line<'static>) -> Self {
-        Fila { izq, der: None }
+        Fila { izq, der: None, ancho: 0, fondo: None }
     }
+}
+
+/// Una banda (como `widgets::banda`) hecha de filas, para que se desplace con las demás: tres filas de `ancho`
+/// columnas con el fondo suave y `linea` en la del medio.
+pub(super) fn filas_banda(linea: Line<'static>, fondo: Color, ancho: u16) -> [Fila; 3] {
+    let fila = |izq: Line<'static>| Fila { izq, der: None, ancho, fondo: Some(fondo) };
+    [fila(Line::default()), fila(linea), fila(Line::default())]
 }
 
 /// Las líneas de un texto, como filas.
@@ -93,8 +114,8 @@ pub(super) fn filas(v: Vec<Line<'static>>) -> Vec<Fila> {
     v.into_iter().map(Fila::from).collect()
 }
 
-/// Una fila de `w` caracteres: a la izquierda un texto (recortado si no cabe) y a la derecha unas columnas de
-/// ancho fijo.
+/// Una fila de `w` caracteres: a la izquierda un texto (recortado si no cabe) y a la derecha (acabando en la
+/// columna `w`) unas columnas de ancho fijo.
 pub(super) fn fila(izq: &str, estilo: Style, cols: &[(String, usize, Style)], w: usize) -> Fila {
     let derecha: usize = cols.iter().map(|c| c.1 + 1).sum();
     let libre = w.saturating_sub(derecha);
@@ -103,15 +124,17 @@ pub(super) fn fila(izq: &str, estilo: Style, cols: &[(String, usize, Style)], w:
         et = et.chars().take(libre.saturating_sub(1)).collect::<String>() + "…";
     }
     let der = cols.iter().map(|(txt, ancho, st)| Span::styled(format!(" {txt:>ancho$}"), *st)).collect::<Vec<_>>();
-    Fila { izq: Line::styled(et, estilo), der: Some(Line::from(der).right_aligned()) }
+    Fila { izq: Line::styled(et, estilo), der: Some(Line::from(der).right_aligned()), ancho: w.min(u16::MAX as usize) as u16, fondo: None }
 }
 
-/// Pinta un recuadro con las filas que caben, desde la `desde`.
-pub(super) fn pintar_filas(f: &mut Frame, area: Rect, b: ratatui::widgets::Block, v: &[Fila], desde: usize) {
-    let dentro = b.inner(area);
-    f.render_widget(b, area);
-    for (i, fl) in v.iter().skip(desde).take(dentro.height as usize).enumerate() {
-        let r = Rect { y: dentro.y + i as u16, height: 1, ..dentro };
+/// Pinta en `area` las filas que caben, desde la `desde`.
+pub(super) fn pintar_filas(f: &mut Frame, area: Rect, v: &[Fila], desde: usize) {
+    for (i, fl) in v.iter().skip(desde).take(area.height as usize).enumerate() {
+        let r = Rect { y: area.y + i as u16, height: 1, ..area };
+        let r = if fl.ancho > 0 { Rect { width: r.width.min(fl.ancho), ..r } } else { r };
+        if let Some(c) = fl.fondo {
+            f.buffer_mut().set_style(r, Style::new().bg(c));
+        }
         pintar_linea(f, r, &fl.izq);
         if let Some(d) = &fl.der {
             pintar_linea(f, r, d);
@@ -209,17 +232,19 @@ pub(super) struct Tabla<'a> {
     pub(super) filas: Vec<FilaT>,
 }
 
-/// Pinta una tabla con la fila elegida resaltada y desplazada para que se vea (`desde` es la primera fila que se
-/// ve). Hecha a mano: lo justo de `Table`, pero mucho más rápida en debug.
-pub(super) fn tabla(f: &mut Frame, area: Rect, b: ratatui::widgets::Block, t: &Tabla, sel: Option<usize>, desde: &mut usize) {
+/// Espacios entre las columnas de una `tabla`.
+const ENTRE_COLUMNAS: u16 = 2;
+
+/// Pinta una tabla sin caja (la cabecera en gris; la fila elegida, con el fondo suave de la sección) y desplazada
+/// para que se vea la elegida (`desde` es la primera fila que se ve). Hecha a mano: lo justo de `Table`, pero
+/// mucho más rápida en debug.
+pub(super) fn tabla(f: &mut Frame, dentro: Rect, t: &Tabla, sel: Option<usize>, desde: &mut usize) {
     let (cols, cab, filas) = (t.cols, t.cab, &t.filas);
-    let dentro = b.inner(area);
-    f.render_widget(b, area);
     if dentro.height == 0 || dentro.width == 0 {
         return;
     }
-    // Las x de cada columna (un espacio entre columnas; la de «lo que sobre» se lleva el resto).
-    let fijo: u16 = cols.iter().map(|c| c.ancho.unwrap_or(0)).sum::<u16>() + cols.len().saturating_sub(1) as u16;
+    // Las x de cada columna (la de «lo que sobre» se lleva el resto).
+    let fijo: u16 = cols.iter().map(|c| c.ancho.unwrap_or(0)).sum::<u16>() + cols.len().saturating_sub(1) as u16 * ENTRE_COLUMNAS;
     let resto = dentro.width.saturating_sub(fijo);
     let mut xs = Vec::with_capacity(cols.len());
     let mut x = dentro.x;
@@ -227,7 +252,7 @@ pub(super) fn tabla(f: &mut Frame, area: Rect, b: ratatui::widgets::Block, t: &T
     for c in cols {
         let w = c.ancho.unwrap_or(resto).min(fin.saturating_sub(x));
         xs.push((x, w));
-        x = (x + w + 1).min(fin);
+        x = x.saturating_add(w + ENTRE_COLUMNAS).min(fin);
     }
     let celda = |f: &mut Frame, i: usize, y: u16, l: &Line| {
         let (x, w) = xs[i];

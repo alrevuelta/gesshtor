@@ -6,15 +6,15 @@
 //!    100 al 199).
 //! 2. **Cómo se lee** de su PDF (`leer`): no es un formulario, sino una lista
 //!    («Ingresos de explotación 23.500,00 0171»). Se elige la numeración de casillas en la que cuadra la cuota
-//!    diferencial (cuota resultante − pagos a cuenta), y cada bloque (trabajo, capital, actividad…) solo se queda
-//!    si cuadran sus propias sumas: si alguna casilla no es lo que se espera, ese bloque se queda fuera en vez de
-//!    salir mal (las casillas se ven igualmente en la ficha de la Renta). Lo que busca en el texto del PDF, al
-//!    final (`Texto`).
+//!    diferencial (cuota resultante − pagos a cuenta). Un bloque (trabajo, capital, actividad…) sin ninguna de sus
+//!    casillas no aplica (`None`); uno con sus casillas tiene que cuadrar con sus propias sumas, y lo leído entero,
+//!    consigo mismo (`comprobar`): si no, la Renta no se da por leída (`Fallo::Bloque`, `Fallo::Incoherente`), en
+//!    vez de salir a medias. Lo que busca en el texto del PDF, al final (`Texto`).
 //! 3. **Cuándo se presenta**: de abril a junio del año siguiente (`hacienda::plazo_renta`).
 //!
 //! La app no la calcula: la lee. Para saber si te retienen bien, `irpf` estima el IRPF de un sueldo.
 
-use super::modelo::{Fallo, Modelo};
+use super::modelo::{Descuadre, Fallo, Modelo};
 use super::pdf::{Documento, Palabra};
 use crate::dominio::fmt::r2;
 use crate::dominio::hacienda::Tipo;
@@ -247,21 +247,23 @@ pub fn leer(doc: &Documento, ejercicio: i32) -> Result<Renta, Fallo> {
     let rectificativa = es_rectificativa(&t.todo);
     let regulariza = rectificativa && hay(l.regularizacion);
     let mut mal = Vec::new();
-    if regulariza && !igual(v(l.regularizacion), r2(v(l.resultado) - v(l.pagado_antes) + v(l.devuelto_antes))) {
-        mal.push(l.regularizacion);
+    let regularizacion = r2(v(l.resultado) - v(l.pagado_antes) + v(l.devuelto_antes));
+    if regulariza && !igual(v(l.regularizacion), regularizacion) {
+        mal.push(Descuadre { casilla: l.regularizacion, leido: v(l.regularizacion), debe: regularizacion });
     }
     let a_mover = if regulariza { v(l.regularizacion) } else { v(l.resultado) };
-    // Documento de ingreso o devolución (última página con contenido)
+    // Documento de ingreso o devolución (última página con contenido): su «Resultado a ingresar o devolver» va como
+    // la casilla 700 (que no existe).
     let doc_ingreso = pagina_de_ingreso(&t.paginas);
-    if resultado_a_ingresar(doc_ingreso).is_some_and(|x| !igual(x, a_mover)) {
-        mal.push(700);
+    if let Some(x) = resultado_a_ingresar(doc_ingreso).filter(|x| !igual(*x, a_mover)) {
+        mal.push(Descuadre { casilla: 700, leido: x, debe: a_mover });
     }
     if !mal.is_empty() {
         return Err(Fallo::NoCuadra { modelo: Modelo::M100, casillas: mal });
     }
     let (forma, plazos) = forma_y_plazos(doc_ingreso, a_mover, ejercicio);
 
-    let actividad = actividad(&k, l).map(|mut a| {
+    let actividad = actividad(&k, l)?.map(|mut a| {
         let c = &l.actividad;
         a.tipo = texto_de_casilla(&t.todo, c.tipo);
         a.iae = texto_de_casilla(&t.todo, c.iae);
@@ -269,18 +271,18 @@ pub fn leer(doc: &Documento, ejercicio: i32) -> Result<Renta, Fallo> {
         a
     });
     let comunidad = texto_de_comunidad(&t.todo, l.comunidad).map(|c| comunidad_de_texto(&c)).unwrap_or_default();
-    Ok(Renta {
+    let r = Renta {
         v: VERSION,
         numeracion: l.id.into(),
         ejercicio,
-        trabajo: trabajo(&k, l),
-        capital: capital(&k, l),
+        trabajo: trabajo(&k, l)?,
+        capital: capital(&k, l)?,
         actividad,
-        ganancias: ganancias(&k, l),
+        ganancias: ganancias(&k, l)?,
         inmuebles: inmuebles(&k, l),
         bases: hay(l.cuotas.base_general).then(|| Bases { general: v(l.cuotas.base_general), ahorro: v(l.cuotas.base_ahorro) }),
-        cuotas: cuotas(&k, l),
-        pagos: pagos(&k, l),
+        cuotas: cuotas(&k, l)?,
+        pagos: pagos(&k, l)?,
         comunidad,
         conjunta: es_conjunta(&t.min),
         resultado: v(l.resultado),
@@ -296,7 +298,19 @@ pub fn leer(doc: &Documento, ejercicio: i32) -> Result<Renta, Fallo> {
         forma,
         plazos,
         casillas: k.c,
-    })
+    };
+    let mal = comprobar(&r);
+    if mal.is_empty() { Ok(r) } else { Err(Fallo::Incoherente(mal)) }
+}
+
+/// Un bloque de la Renta: si no tiene ninguna de sus casillas, no aplica (`None`); si tiene alguna, tiene que
+/// haberse leído (`leido`: lo que sale si cuadra) o es un fallo, con la regla y las casillas que tiene.
+fn bloque<T>(k: &Casillas, nombre: &'static str, regla: String, casillas: &[u32], leido: Option<T>) -> Result<Option<T>, Fallo> {
+    if !casillas.iter().any(|&n| k.hay(n)) {
+        return Ok(None);
+    }
+    let vistas = casillas.iter().filter(|&&n| k.hay(n)).map(|&n| (n, k.v(n))).collect();
+    leido.map(Some).ok_or(Fallo::Bloque { bloque: nombre, regla, casillas: vistas })
 }
 
 /// Cómo se paga o se devuelve (domiciliado, con reconocimiento de deuda, en el banco, a devolver, a cero; None si
@@ -343,12 +357,16 @@ fn fracciona(min: &str) -> bool {
 }
 
 /// Rendimientos del trabajo: solo si íntegros ≥ dinerarios ≥ … y el rendimiento previo cuadra.
-fn trabajo(k: &Casillas, l: &Numeracion) -> Option<Trabajo> {
+fn trabajo(k: &Casillas, l: &Numeracion) -> Result<Option<Trabajo>, Fallo> {
     let t = &l.trabajo;
     let v = |n| k.v(n);
     let otros: f64 = t.otros.iter().map(|&n| v(n)).sum();
     let previo_ok = !k.hay(t.previo) || igual(v(t.previo), r2(v(t.integros) - v(t.ss) - otros));
-    (k.hay(t.integros) && v(t.integros) + 0.005 >= v(t.dinerario) && v(t.neto) <= v(t.integros) + 0.005 && previo_ok).then(|| Trabajo {
+    let regla = format!(
+        "íntegros ({:04}) ≥ retribuciones dinerarias ({:04}), rendimiento neto ({:04}) ≤ íntegros y rendimiento previo ({:04}) = íntegros − Seguridad Social ({:04}) − otros gastos ({:04} a {:04})",
+        t.integros, t.dinerario, t.neto, t.previo, t.ss, t.otros[0], t.otros[2]
+    );
+    let leido = (k.hay(t.integros) && v(t.integros) + 0.005 >= v(t.dinerario) && v(t.neto) <= v(t.integros) + 0.005 && previo_ok).then(|| Trabajo {
         dinerario: v(t.dinerario),
         especie: v(t.especie),
         integros: v(t.integros),
@@ -356,17 +374,20 @@ fn trabajo(k: &Casillas, l: &Numeracion) -> Option<Trabajo> {
         neto: Some(v(t.neto)),
         neto_reducido: Some(if k.hay(t.reducido) { v(t.reducido) } else { v(t.neto) }),
         retenciones: Some(v(l.ret_trabajo)),
-    })
+    });
+    bloque(k, "trabajo", regla, &[t.dinerario, t.especie, t.integros, t.ss, t.previo, t.neto, t.reducido], leido)
 }
 
 /// Rentas del ahorro: capital mobiliario (intereses, dividendos, total, gastos y neto). En una conjunta con
 /// rendimientos de los dos, cada uno trae su bloque: entonces solo se sabe el total a integrar en el ahorro.
-fn capital(k: &Casillas, l: &Numeracion) -> Option<Capital> {
+fn capital(k: &Casillas, l: &Numeracion) -> Result<Option<Capital>, Fallo> {
     let c = &l.capital;
     let v = |n| k.v(n);
+    let regla = format!("rendimiento neto ({:04}) = íntegros ({:04}) − gastos ({:04}), o la suma a integrar en el ahorro ({:04})", c.neto, c.integros, c.gastos, c.ahorro);
+    let casillas = [c.intereses, c.dividendos, c.integros, c.gastos, c.neto, c.ahorro];
     if k.hay(c.integros) && igual(v(c.neto), r2(v(c.integros) - v(c.gastos))) {
         let div = v(c.dividendos);
-        return Some(Capital {
+        return Ok(Some(Capital {
             intereses: v(c.intereses),
             dividendos: div,
             otros: r2(v(c.integros) - v(c.intereses) - div),
@@ -374,30 +395,36 @@ fn capital(k: &Casillas, l: &Numeracion) -> Option<Capital> {
             gastos: v(c.gastos),
             neto: if k.hay(c.ahorro) { v(c.ahorro) } else { v(c.neto) },
             ..Default::default()
-        });
+        }));
     }
-    k.hay(c.ahorro).then(|| Capital { solo_total: true, integros: v(c.ahorro), neto: v(c.ahorro), ..Default::default() })
+    let leido = k.hay(c.ahorro).then(|| Capital { solo_total: true, integros: v(c.ahorro), neto: v(c.ahorro), ..Default::default() });
+    bloque(k, "capital", regla, &casillas, leido)
 }
 
 /// Pagos a cuenta: retenciones del trabajo, del capital mobiliario y de actividades, y el 130.
-fn pagos(k: &Casillas, l: &Numeracion) -> Option<Pagos> {
-    let p = [l.ret_trabajo, l.ret_capital, l.ret_actividades, l.fraccionados].map(|n| k.v(n));
-    (k.hay(l.pagos) && r2(p.iter().sum()) <= k.v(l.pagos) + 0.005).then(|| Pagos {
+fn pagos(k: &Casillas, l: &Numeracion) -> Result<Option<Pagos>, Fallo> {
+    let n = [l.ret_trabajo, l.ret_capital, l.ret_actividades, l.fraccionados];
+    let p = n.map(|n| k.v(n));
+    let regla = format!("retenciones ({:04}, {:04}, {:04}) + pagos fraccionados ({:04}) ≤ total de pagos a cuenta ({:04})", n[0], n[1], n[2], n[3], l.pagos);
+    let leido = (k.hay(l.pagos) && r2(p.iter().sum()) <= k.v(l.pagos) + 0.005).then(|| Pagos {
         trabajo: p[0],
         capital: p[1],
         actividades: p[2],
         fraccionados: p[3],
         total: k.v(l.pagos),
-    })
+    });
+    bloque(k, "pagos", regla, &[l.pagos, n[0], n[1], n[2], n[3]], leido)
 }
 
 /// Actividad económica (la principal): lo facturado, los gastos (con la Seguridad Social del titular y la provisión
 /// de difícil justificación) y el rendimiento; solo si rendimiento = ingresos − gastos.
-fn actividad(k: &Casillas, l: &Numeracion) -> Option<Actividad> {
+fn actividad(k: &Casillas, l: &Numeracion) -> Result<Option<Actividad>, Fallo> {
     let a = &l.actividad;
     let v = |n| k.v(n);
-    let gastos = *a.gastos.iter().find(|&&n| k.hay(n) && igual(v(a.neto), r2(v(a.ingresos) - v(n))))?;
-    k.hay(a.ingresos).then(|| Actividad {
+    let regla = format!("rendimiento neto ({:04}) = ingresos ({:04}) − total de gastos ({:04})", a.neto, a.ingresos, a.gastos[0]);
+    let casillas: Vec<u32> = [a.ingresos, a.neto, a.reducido].into_iter().chain(a.gastos.iter().copied()).collect();
+    let gastos = a.gastos.iter().find(|&&n| k.hay(n) && igual(v(a.neto), r2(v(a.ingresos) - v(n))));
+    let leido = gastos.filter(|_| k.hay(a.ingresos)).map(|&gastos| Actividad {
         ingresos: v(a.ingresos),
         ss_titular: Some(a.ss.iter().map(|&n| v(n)).find(|x| *x != 0.0).unwrap_or(0.0)),
         gastos: v(gastos),
@@ -406,22 +433,25 @@ fn actividad(k: &Casillas, l: &Numeracion) -> Option<Actividad> {
         reduccion: Some(v(a.reduccion)),
         neto_reducido: Some(if k.hay(a.reducido) { v(a.reducido) } else { v(a.neto) }),
         ..Default::default()
-    })
+    });
+    bloque(k, "actividad", regla, &casillas, leido)
 }
 
 /// Ganancias y pérdidas patrimoniales: sumas y saldo neto (sin las pérdidas de años anteriores que se compensen),
 /// y aparte las de criptomonedas y otros bienes.
-fn ganancias(k: &Casillas, l: &Numeracion) -> Option<Ganancias> {
+fn ganancias(k: &Casillas, l: &Numeracion) -> Result<Option<Ganancias>, Fallo> {
     let g = &l.ganancias;
     let v = |n| k.v(n);
     let gp = |(ganancias, perdidas): (u32, u32)| Some(GananciasPerdidas { ganancias: v(ganancias), perdidas: v(perdidas) });
-    ((k.hay(g.ganancias) || k.hay(g.perdidas)) && igual(v(g.neto), r2(v(g.ganancias) - v(g.perdidas)).max(0.0))).then(|| Ganancias {
+    let regla = format!("saldo neto ({:04}) = máx(0, ganancias ({:04}) − pérdidas ({:04}))", g.neto, g.ganancias, g.perdidas);
+    let leido = ((k.hay(g.ganancias) || k.hay(g.perdidas)) && igual(v(g.neto), r2(v(g.ganancias) - v(g.perdidas)).max(0.0))).then(|| Ganancias {
         ganancias: v(g.ganancias),
         perdidas: v(g.perdidas),
         neto: v(g.neto),
         cripto: gp(g.cripto),
         otros: gp(g.otros),
-    })
+    });
+    bloque(k, "ganancias", regla, &[g.ganancias, g.perdidas, g.neto], leido)
 }
 
 /// Inmuebles: lo cobrado de alquiler y lo que te deja (sin la reducción por alquiler de vivienda, que solo es
@@ -443,13 +473,18 @@ fn inmuebles(k: &Casillas, l: &Numeracion) -> Option<Inmuebles> {
 
 /// Bases y cuotas: la general y la del ahorro (estatal + autonómica), solo si cuadran con la cuota íntegra.
 /// Deducciones: de la íntegra a la líquida.
-fn cuotas(k: &Casillas, l: &Numeracion) -> Option<Cuotas> {
+fn cuotas(k: &Casillas, l: &Numeracion) -> Result<Option<Cuotas>, Fallo> {
     let c = &l.cuotas;
     let v = |n| k.v(n);
     let dos = |[a, b]: [u32; 2]| r2(v(a) + v(b));
-    let todas = [c.general, c.ahorro, c.integra, c.liquida].iter().flatten().all(|&n| k.hay(n));
+    let casillas: Vec<u32> = [c.general, c.ahorro, c.integra, c.liquida].into_iter().flatten().collect();
+    let todas = casillas.iter().all(|&n| k.hay(n));
     let general_ahorro = r2(v(c.general[0]) + v(c.general[1]) + v(c.ahorro[0]) + v(c.ahorro[1]));
-    (todas && igual(dos(c.integra), general_ahorro)).then(|| Cuotas {
+    let regla = format!(
+        "están las ocho (cuota general, del ahorro, íntegra y líquida, estatal y autonómica) y la íntegra ({:04} + {:04}) = la general ({:04} + {:04}) + la del ahorro ({:04} + {:04})",
+        c.integra[0], c.integra[1], c.general[0], c.general[1], c.ahorro[0], c.ahorro[1]
+    );
+    let leido = (todas && igual(dos(c.integra), general_ahorro)).then(|| Cuotas {
         base_general: v(c.base_general),
         base_ahorro: v(c.base_ahorro),
         liquidable_general: if k.hay(c.liquidable_general) { v(c.liquidable_general) } else { v(c.base_general) },
@@ -458,7 +493,60 @@ fn cuotas(k: &Casillas, l: &Numeracion) -> Option<Cuotas> {
         ahorro: dos(c.ahorro),
         integra: dos(c.integra),
         liquida: dos(c.liquida),
-    })
+    });
+    bloque(k, "cuotas", regla, &casillas, leido)
+}
+
+/// Que lo leído cuadre consigo mismo, bloque a bloque y con el resultado: lo que no cuadra (vacío si todo cuadra).
+pub fn comprobar(r: &Renta) -> Vec<String> {
+    const T: f64 = 0.005;
+    let mut mal = Vec::new();
+    let mut ok = |cond: bool, que: &str| {
+        if !cond {
+            mal.push(que.to_string());
+        }
+    };
+    let eq = |a: f64, b: f64| (a - b).abs() <= T;
+    ok(eq(r.diferencial, r2(r.cuota - r.pagos_cuenta)), "diferencial = cuota − pagos a cuenta");
+    ok(r.casilla(NUMERACION_2018.resultado) == Some(r.resultado), "resultado = casilla 0670");
+    if let Some(t) = &r.trabajo {
+        ok(t.integros + T >= t.dinerario && t.neto.unwrap_or(0.0) <= t.integros + T, "trabajo: dinerario ≤ íntegros ≥ neto");
+        ok(r.pagos.as_ref().is_none_or(|p| eq(p.trabajo, t.retenciones.unwrap_or(0.0))), "trabajo: retenciones = pagos.trabajo");
+    }
+    if let Some(c) = &r.capital {
+        ok(c.solo_total || eq(c.otros, r2(c.integros - c.intereses - c.dividendos)), "capital: otros = íntegros − intereses − dividendos");
+        ok(c.gastos <= c.integros + T, "capital: gastos ≤ íntegros");
+    }
+    if let Some(a) = &r.actividad {
+        ok(eq(a.neto, r2(a.ingresos - a.gastos)), "actividad: neto = ingresos − gastos");
+        ok(a.gdj.unwrap_or(0.0) <= a.gastos + T && a.ss_titular.unwrap_or(0.0) <= a.gastos + T, "actividad: gdj y cuota ≤ gastos");
+        ok(!a.tipo.is_empty() && !a.iae.is_empty() && !a.modalidad.is_empty(), "actividad: tipo, epígrafe y modalidad");
+    }
+    if let Some(g) = &r.ganancias {
+        ok(eq(g.neto, r2(g.ganancias - g.perdidas).max(0.0)), "ganancias: neto = máx(0, ganancias − pérdidas)");
+        let partes = g.cripto.as_ref().map_or(0.0, |x| x.ganancias) + g.otros.as_ref().map_or(0.0, |x| x.ganancias);
+        ok(partes <= g.ganancias + T, "ganancias: cripto + otros ≤ total");
+    }
+    if let Some(p) = &r.pagos {
+        ok(r2(p.trabajo + p.capital + p.actividades + p.fraccionados) <= p.total + T, "pagos: partes ≤ total");
+        ok(eq(p.total, r.pagos_cuenta), "pagos: total = pagos a cuenta");
+    }
+    if let Some(c) = &r.cuotas {
+        ok(eq(c.integra, r2(c.general + c.ahorro)), "cuotas: íntegra = general + ahorro");
+        ok(c.liquida <= c.integra + T, "cuotas: líquida ≤ íntegra");
+        ok(r.bases.as_ref().is_some_and(|b| eq(b.general, c.base_general) && eq(b.ahorro, c.base_ahorro)), "cuotas: bases = bases");
+    }
+    if let Some(i) = &r.inmuebles {
+        ok(eq(i.neto, r2(i.reducidos + i.reduccion)) && i.reduccion >= 0.0, "inmuebles: neto = reducidos + reducción");
+    }
+    let a_mover = if r.rectificativa { r.regularizacion.unwrap_or(r.resultado) } else { r.resultado };
+    match r.forma {
+        Some(Tipo::Devolver) => ok(a_mover < 0.0 && r.plazos.is_empty(), "forma D: a devolver, sin plazos"),
+        Some(Tipo::Cero) => ok(a_mover.abs() < T && r.plazos.is_empty(), "forma N: cero, sin plazos"),
+        Some(_) => ok(a_mover > 0.0 && eq(r2(r.plazos.iter().map(|p| p.importe).sum()), a_mover), "a ingresar: plazos = resultado"),
+        None => ok(false, "a ingresar: la forma de pago («Forma de pago» en el documento de ingreso)"),
+    }
+    mal
 }
 
 /* ================= 2. leerla de su PDF: lo que busca en el texto ================= */
@@ -569,7 +657,7 @@ fn digito(b: &[u8], i: usize) -> bool {
     b.get(i).is_some_and(u8::is_ascii_digit)
 }
 
-/// `\w` de JavaScript (sin la bandera u).
+/// Letra o cifra sin acento, o «_» (lo que es `\w` en una expresión regular sin Unicode).
 fn de_palabra(c: Option<char>) -> bool {
     c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
 }
@@ -626,7 +714,7 @@ fn importes_con_casilla(todo: &str) -> Vec<(u32, f64)> {
     v
 }
 
-/* ---------------- lo que la web busca en el texto ---------------- */
+/* ---------------- lo que se busca en el texto ---------------- */
 
 /// `/Modelo\s*100\b/i`
 fn es_modelo_100(min: &str) -> bool {
@@ -884,6 +972,25 @@ mod tests {
         assert_eq!(leer(&Documento::default(), 2024).unwrap_err(), Fallo::NoEsLaRenta(2024));
     }
 
+    /// Un bloque sin ninguna de sus casillas no aplica; con ellas, o cuadra o es un fallo (antes, se quedaba fuera sin
+    /// decir nada). Con casillas inventadas, en el texto como en el PDF («importe casilla»).
+    #[test]
+    fn un_bloque_con_sus_casillas_tiene_que_cuadrar() {
+        let l = &NUMERACION_2018;
+        let k = |t: &str| Casillas::leer(&Documento::default(), t);
+        assert!(matches!(trabajo(&k("1.000,00 0180"), l), Ok(None)), "sin sueldo, no aplica");
+        let bien = k("20.000,00 0003\n20.000,00 0012\n1.270,00 0013\n18.730,00 0017\n18.730,00 0022");
+        assert_eq!(trabajo(&bien, l).unwrap().map(|t| t.integros), Some(20000.0));
+        let mal = k("20.000,00 0003\n20.000,00 0012\n1.270,00 0013\n1,00 0017\n18.730,00 0022");
+        let e = trabajo(&mal, l).unwrap_err();
+        assert_eq!((e.codigo().as_str(), e.donde().as_str()), ("AEAT_100_BLOQUE_NO_CUADRA", "src/hacienda/modelo_100.rs · trabajo (dentro de leer)"));
+        assert!(e.to_string().starts_with("En la Renta, lo de trabajo no cuadra: íntegros (0012) ≥") && e.encontrado().contains("0017 = 1.00"), "{e} · {}", e.encontrado());
+        // Lo mismo con las ganancias y la actividad.
+        assert!(ganancias(&k("100,00 0422\n0,00 0423\n90,00 0424"), l).is_err());
+        assert!(actividad(&k("1.000,00 0180\n100,00 0223\n900,00 0224"), l).unwrap().is_some());
+        assert!(actividad(&k("1.000,00 0180\n100,00 0223\n800,00 0224"), l).is_err());
+    }
+
     #[test]
     fn pago_en_dos_plazos() {
         assert!(fracciona("opciones de fraccionamiento\n  fraccionamiento del pago en dos plazos x\n"));
@@ -934,11 +1041,9 @@ mod tests {
 
 #[cfg(test)]
 mod pruebas {
-    //! Pruebas con Rentas de verdad extraídas y anonimizadas (`pruebas/renta_*.json`).
+    //! Pruebas con Rentas de verdad, leídas de su PDF (`pruebas/renta_*.pdf`).
     use crate::dominio::renta::Renta;
-    use crate::dominio::fmt::r2;
     use crate::dominio::PRIMER_ANIO;
-    use crate::dominio::hacienda::Tipo;
     use crate::hacienda::pdf;
     use serde_json::Value;
     use std::path::Path;
@@ -989,63 +1094,14 @@ mod pruebas {
         }
     }
 
-    /// Que lo leído cuadre consigo mismo (todos los bloques).
-    fn coherente(r: &Renta) -> Vec<String> {
-        let mut mal = Vec::new();
-        let mut ok = |cond: bool, que: &str| {
-            if !cond {
-                mal.push(que.to_string());
-            }
-        };
-        let eq = |a: f64, b: f64| (a - b).abs() <= TOLERANCIA;
-        ok(eq(r.diferencial, r2(r.cuota - r.pagos_cuenta)), "diferencial = cuota − pagos a cuenta");
-        ok(r.casilla(670) == Some(r.resultado), "resultado = casilla 0670");
-        if let Some(t) = &r.trabajo {
-            ok(t.integros + TOLERANCIA >= t.dinerario && t.neto.unwrap_or(0.0) <= t.integros + TOLERANCIA, "trabajo: dinerario ≤ íntegros ≥ neto");
-            ok(r.pagos.as_ref().is_none_or(|p| eq(p.trabajo, t.retenciones.unwrap_or(0.0))), "trabajo: retenciones = pagos.trabajo");
-        }
-        if let Some(c) = &r.capital {
-            ok(c.solo_total || eq(c.otros, r2(c.integros - c.intereses - c.dividendos)), "capital: otros = íntegros − intereses − dividendos");
-            ok(c.gastos <= c.integros + TOLERANCIA, "capital: gastos ≤ íntegros");
-        }
-        if let Some(a) = &r.actividad {
-            ok(eq(a.neto, r2(a.ingresos - a.gastos)), "actividad: neto = ingresos − gastos");
-            ok(a.gdj.unwrap_or(0.0) <= a.gastos + TOLERANCIA && a.ss_titular.unwrap_or(0.0) <= a.gastos + TOLERANCIA, "actividad: gdj y cuota ≤ gastos");
-            ok(!a.tipo.is_empty() && !a.iae.is_empty() && !a.modalidad.is_empty(), "actividad: tipo, epígrafe y modalidad");
-        }
-        if let Some(g) = &r.ganancias {
-            ok(eq(g.neto, r2(g.ganancias - g.perdidas).max(0.0)), "ganancias: neto = máx(0, ganancias − pérdidas)");
-            let partes = g.cripto.as_ref().map_or(0.0, |x| x.ganancias) + g.otros.as_ref().map_or(0.0, |x| x.ganancias);
-            ok(partes <= g.ganancias + TOLERANCIA, "ganancias: cripto + otros ≤ total");
-        }
-        if let Some(p) = &r.pagos {
-            ok(r2(p.trabajo + p.capital + p.actividades + p.fraccionados) <= p.total + TOLERANCIA, "pagos: partes ≤ total");
-            ok(eq(p.total, r.pagos_cuenta), "pagos: total = pagos a cuenta");
-        }
-        if let Some(c) = &r.cuotas {
-            ok(eq(c.integra, r2(c.general + c.ahorro)), "cuotas: íntegra = general + ahorro");
-            ok(c.liquida <= c.integra + TOLERANCIA, "cuotas: líquida ≤ íntegra");
-            ok(r.bases.as_ref().is_some_and(|b| eq(b.general, c.base_general) && eq(b.ahorro, c.base_ahorro)), "cuotas: bases = bases");
-        }
-        if let Some(i) = &r.inmuebles {
-            ok(eq(i.neto, r2(i.reducidos + i.reduccion)) && i.reduccion >= 0.0, "inmuebles: neto = reducidos + reducción");
-        }
-        let a_mover = if r.rectificativa { r.regularizacion.unwrap_or(r.resultado) } else { r.resultado };
-        match r.forma {
-            Some(Tipo::Devolver) => ok(a_mover < 0.0 && r.plazos.is_empty(), "forma D: a devolver, sin plazos"),
-            Some(Tipo::Cero) => ok(a_mover.abs() < TOLERANCIA && r.plazos.is_empty(), "forma N: cero, sin plazos"),
-            _ => ok(a_mover > 0.0 && eq(r2(r.plazos.iter().map(|p| p.importe).sum()), a_mover), "a ingresar: plazos = resultado"),
-        }
-        mal
-    }
-
     /* ---------------- Rentas de verdad (no van al repositorio) ---------------- */
 
-    /// Las Rentas de prueba de `pruebas/` (`renta_*.json`): sacadas de PDF de verdad, no van al repositorio (con los
-    /// importes multiplicados por un factor no basta: se puede deducir). Sus pruebas se pasan con `--ignored`; hasta
-    /// que haya Rentas con datos inventados en `pruebas/pdf/`.
+    /// Las Rentas de prueba de `pruebas/` (`renta_*.pdf`): PDF de verdad, que no van al repositorio (con los importes
+    /// multiplicados por un factor no basta: se puede deducir). Se leen directamente; sus pruebas se pasan con
+    /// `--ignored`.
     fn documento(nombre: &str) -> pdf::Documento {
-        de_pruebas(nombre)
+        let ruta = Path::new(env!("CARGO_MANIFEST_DIR")).join("pruebas").join(nombre);
+        pdf::abrir(&ruta).unwrap_or_else(|e| panic!("{}: {e}", ruta.display()))
     }
 
     fn de_pruebas<T: serde::de::DeserializeOwned>(nombre: &str) -> T {
@@ -1053,14 +1109,14 @@ mod pruebas {
         serde_json::from_str(&std::fs::read_to_string(ruta).unwrap()).unwrap()
     }
 
-    /// Lee `pruebas/<nombre>.json` y lo compara con `pruebas/<nombre>_esperado.json`.
+    /// Lee `pruebas/<nombre>.pdf` y lo compara con `pruebas/<nombre>_esperado.json`.
     fn leer_renta(nombre: &str, anio: i32, casillas: usize) {
-        let doc = documento(&format!("{nombre}.json"));
+        let doc = documento(&format!("{nombre}.pdf"));
         let t = Instant::now();
         let r = super::leer(&doc, anio).unwrap();
         println!("{nombre}: leído en {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
         assert_eq!((r.v, r.casillas.len()), (super::VERSION, casillas));
-        let mal = coherente(&r);
+        let mal = super::comprobar(&r);
         assert!(mal.is_empty(), "{mal:?}");
         let esperado: Value = de_pruebas(&format!("{nombre}_esperado.json"));
         let leido = serde_json::to_value(&r).unwrap();
@@ -1073,14 +1129,14 @@ mod pruebas {
     }
 
     #[test]
-    #[ignore = "con una Renta de verdad (pruebas/renta_*.json), que no va al repositorio"]
-    fn renta_anonima_con_todos_los_bloques() {
+    #[ignore = "con una Renta de verdad (pruebas/renta_*.pdf), que no va al repositorio"]
+    fn renta_con_todos_los_bloques() {
         leer_renta("renta_2020", 2020, 124);
     }
 
     #[test]
-    #[ignore = "con una Renta de verdad (pruebas/renta_*.json), que no va al repositorio"]
-    fn rectificativa_anonima() {
+    #[ignore = "con una Renta de verdad (pruebas/renta_*.pdf), que no va al repositorio"]
+    fn rectificativa() {
         leer_renta("renta_2024_rectificativa", 2024, 87);
     }
 
@@ -1095,9 +1151,9 @@ mod pruebas {
     }
 
     #[test]
-    #[ignore = "con una Renta de verdad (pruebas/renta_*.json), que no va al repositorio"]
+    #[ignore = "con una Renta de verdad (pruebas/renta_*.pdf), que no va al repositorio"]
     fn errores_de_lectura() {
-        let doc = documento("renta_2020.json");
+        let doc = documento("renta_2020.pdf");
         let error = |r: Result<Renta, crate::hacienda::modelo::Fallo>| r.unwrap_err().to_string();
         assert_eq!(error(super::leer(&doc, 2021)), "El PDF no es la Renta de 2021.");
         assert_eq!(error(super::leer(&doc, PRIMER_ANIO - 1)), format!("La app lee las Rentas desde {PRIMER_ANIO}."));
@@ -1107,18 +1163,20 @@ mod pruebas {
         assert_eq!(error(super::leer(&otro, 2020)), "No reconozco la numeración de las casillas de la Renta de 2020.");
         // Una rectificativa cuya regularización no es resultado − lo ya ingresado + lo ya devuelto (y entonces tampoco
         // es lo que dice el documento de ingreso o devolución).
-        let mut rect = documento("renta_2024_rectificativa.json");
+        let mut rect = documento("renta_2024_rectificativa.pdf");
         cambiar_casilla(&mut rect, "0685", "1,00");
         assert_eq!(error(super::leer(&rect, 2024)), "Lo que he leído no cuadra (casillas 0685, 0700).");
     }
 
     #[test]
-    #[ignore = "con una Renta de verdad (pruebas/renta_*.json), que no va al repositorio"]
-    fn un_bloque_que_no_cuadra_se_queda_fuera() {
-        let mut doc = documento("renta_2020.json");
-        // Si el rendimiento de la actividad no es ingresos − gastos, no hay bloque de actividad (el resto sigue).
+    #[ignore = "con una Renta de verdad (pruebas/renta_*.pdf), que no va al repositorio"]
+    fn un_bloque_que_no_cuadra_es_un_fallo() {
+        let mut doc = documento("renta_2020.pdf");
+        // Si el rendimiento de la actividad no es ingresos − gastos, la Renta no se da por leída (antes, el bloque se
+        // quedaba fuera sin decir nada).
         cambiar_casilla(&mut doc, "0224", "1,00");
-        let r = super::leer(&doc, 2020).unwrap();
-        assert!(r.actividad.is_none() && r.capital.is_some() && r.trabajo.is_some() && r.cuotas.is_some());
+        let e = super::leer(&doc, 2020).unwrap_err();
+        assert!(matches!(&e, crate::hacienda::modelo::Fallo::Bloque { bloque: "actividad", casillas, .. } if casillas.contains(&(224, 1.0))), "{e:?}");
+        assert_eq!(e.to_string(), "En la Renta, lo de actividad no cuadra: rendimiento neto (0224) = ingresos (0180) − total de gastos (0223).");
     }
 }

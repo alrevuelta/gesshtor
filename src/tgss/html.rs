@@ -204,6 +204,25 @@ pub fn resumen(t: &str, n: usize) -> String {
     limpio(t).chars().take(n).collect()
 }
 
+/// Las clases que usa una página (`class="…"`), sin repetir y en orden, como mucho `n`: para el informe de un fallo,
+/// lo que se ve de su estructura sin los datos de nadie.
+pub fn clases(t: &str, n: usize) -> Vec<String> {
+    let bajo = t.to_ascii_lowercase();
+    let mut v: Vec<String> = Vec::new();
+    let mut desde = 0;
+    while let Some(i) = buscar(&bajo, "class=", desde) {
+        desde = i + 6;
+        let Some(&q) = t.as_bytes().get(desde).filter(|q| **q == b'"' || **q == b'\'') else { continue };
+        let Some(f) = t[desde + 1..].find(q as char) else { break };
+        for c in t[desde + 1..desde + 1 + f].split_whitespace() {
+            if v.len() < n && !v.iter().any(|x| x == c) {
+                v.push(c.to_string());
+            }
+        }
+    }
+    v
+}
+
 /// El `<title>` de una página (`_titulo`).
 pub fn titulo(t: &str) -> String {
     let bajo = t.to_ascii_lowercase();
@@ -212,10 +231,10 @@ pub fn titulo(t: &str) -> String {
     desescapar(&t[i + 7..f]).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// El título o, si no tiene, el principio del texto: para decir dónde se ha quedado algo.
+/// El título, para decir dónde se ha quedado algo (sin el texto de la página: puede ser de la persona).
 pub fn donde(t: &str) -> String {
     let t0 = titulo(t);
-    if t0.is_empty() { resumen(t, 160) } else { t0 }
+    if t0.is_empty() { "una página sin título".into() } else { t0 }
 }
 
 // ---------------------------------------------------------------- atributos y formularios

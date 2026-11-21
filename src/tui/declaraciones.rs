@@ -1,6 +1,6 @@
-//! Hacienda: lo que tienes presentado según la última consulta (con tu certificado), sus PDF y
-//! si la app ha podido leerlos; al lado, tus recibos de autónomo de la Seguridad Social y tus declaraciones
-//! censales. Con Enter se ve la ficha de una declaración, con las casillas de su PDF. Aquí solo se mira.
+//! Hacienda: lo que tienes presentado según la última consulta (con tu certificado), sus PDF y si la app ha podido
+//! leerlos, en una lista sin caja (la cabecera en gris, las fechas cortas y el estado con ✓ y su color) y, debajo,
+//! la elegida entera. Con Enter se ve la ficha de una declaración, con las casillas de su PDF. Aquí solo se mira.
 //! Solo desde `PRIMER_ANIO`.
 
 use crate::dominio::Datos;
@@ -8,12 +8,12 @@ use crate::dominio::fmt;
 use crate::hacienda::{self, consulta, Decl, Modelo};
 use crate::dominio::PRIMER_ANIO;
 use detalle::{Detalle, Memo};
-use crate::tui::texto::{cuando, hora};
-use crate::tui::widgets::{bloque, coincide, tema, Entrada};
+use crate::tui::texto::cuando;
+use crate::tui::widgets::{coincide, filas_partidas, linea_atajos, tema, Entrada};
 use crate::tui::{Ctx, Pantalla};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
@@ -124,9 +124,10 @@ fn lectura(ctx: &Ctx, d: &Decl, pdf: Option<&PathBuf>) -> Lectura {
     let l = &ctx.datos.lecturas;
     let q = d.trimestre().unwrap_or(0);
     let hay = hacienda::leida(&ctx.datos, d.ejercicio, q, modelo);
+    // Si se leyó bien antes, vale lo de antes (el fallo de ahora sale en el aviso de fallos, abajo).
     match l.fallos.get(&hacienda::clave(d.ejercicio, q, m)) {
-        Some(motivo) => Lectura::Fallo(motivo.clone()),
-        None if hay => Lectura::Leida,
+        _ if hay => Lectura::Leida,
+        Some(e) => Lectura::Fallo(e.mensaje.clone()),
         None => Lectura::Pendiente(ctx.leyendo.is_some()),
     }
 }
@@ -310,14 +311,16 @@ impl Declaraciones {
 
     /* ---------------- lista de declaraciones ---------------- */
 
+    /// La lista, sin caja: arriba, de qué año (o de todos), cuántas y cuándo se consultó (y en AVISO lo que no se
+    /// pudo consultar) y, si se busca, la búsqueda; la tabla, con la cabecera en gris, las fechas cortas, dónde está
+    /// el PDF y cómo lo ha leído la app (✓ en BIEN, ✗ en MAL), y la elegida en el fondo suave de la sección; y abajo,
+    /// la elegida entera.
     fn dibujar_lista(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
-        let titulo = if self.todos { "Declaraciones presentadas · todos los años".to_string() } else { format!("Declaraciones presentadas en {}", ctx.anio) };
-        let b = bloque(&titulo);
-        let dentro = b.inner(area);
-        f.render_widget(b, area);
+        let gris = tema::apagado();
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
+        let aviso = Style::new().fg(tema::AVISO);
 
-        // Arriba: cuándo se consultó y si algo falló.
-        let mut arriba: Vec<Line> = Vec::new();
+        // Arriba: el año (o todos), cuántas y cuándo se consultó; debajo, si algo falló.
         let n = self.filas.len();
         let vis = self.visibles();
         let cuantas = match n {
@@ -327,42 +330,60 @@ impl Declaraciones {
             n => format!(" · {n} declaraciones"),
         };
         let c = consulta(&ctx.datos, ctx.anio);
+        let mut l0 = Vec::new();
+        let mut avisos: Vec<Line> = Vec::new();
         if self.todos {
+            l0.push(Span::styled("todos los años", negrita));
             let anios = anios_consultados(&ctx.datos);
             if let (Some(a), Some(z)) = (anios.last(), anios.first()) {
-                arriba.push(Line::styled(format!("Años consultados con Hacienda: {a}–{z}{cuantas}"), tema::apagado()));
+                l0.push(Span::styled(format!(" · consultados con Hacienda: {a}–{z}{cuantas}"), gris));
             }
         } else {
+            l0.push(Span::styled(ctx.anio.to_string(), negrita));
+            l0.push(Span::styled(cuantas, gris));
             match &c {
-                Consulta::Hecha(fe) => arriba.push(Line::styled(format!("Consultado con Hacienda {}{cuantas}", cuando(fe)), tema::apagado())),
-                Consulta::Parcial(fe, ms) => arriba.push(Line::styled(
-                    format!("Consulta incompleta: solo {} ({}){cuantas}", ms.join(", "), if fe.is_empty() { "sin fecha".into() } else { cuando(fe) }),
-                    Style::new().fg(tema::AVISO),
+                Consulta::Hecha(fe) => l0.push(Span::styled(format!(" · consultado con Hacienda {}", cuando(fe)), gris)),
+                Consulta::Parcial(fe, ms) => avisos.push(Line::styled(
+                    format!("Consulta incompleta: solo {} ({})", ms.join(", "), if fe.is_empty() { "sin fecha".into() } else { cuando(fe) }),
+                    aviso,
                 )),
                 Consulta::Nunca => {}
             }
             for (m, e) in errores(&ctx.datos, ctx.anio) {
-                arriba.push(Line::styled(format!("No se pudo consultar el {m}: {e}"), Style::new().fg(tema::AVISO)));
+                avisos.push(Line::styled(format!("No se pudo consultar el {m}: {e}"), aviso));
             }
         }
+        avisos.truncate(2);
         self.sel = self.sel.min(vis.len().saturating_sub(1));
         let hay_filtro = self.buscando || !self.busca.valor.is_empty();
-        // Abajo, la elegida: 3 líneas, y una más con el motivo si no se ha podido leer.
-        let fallo = self.elegida().is_some_and(|x| matches!(x.lectura, Lectura::Fallo(..)));
-        let alto_detalle = if vis.is_empty() { 0 } else { 3 + u16::from(fallo) };
-        let [a_arriba, a_tabla, a_detalle, a_busca] = Layout::vertical([
-            Constraint::Length(arriba.len().min(3) as u16),
+        // Abajo, la elegida (con una fila de aire encima): sus líneas, partidas si no caben.
+        let elegida = self.elegida().map(lineas_elegida).unwrap_or_default();
+        let alto_detalle = if elegida.is_empty() { 0 } else { 1 + elegida.iter().map(|l| filas_partidas(&l.to_string(), area.width as usize)).sum::<u16>() };
+        let [a_arriba, a_busca, _, a_tabla, a_detalle] = Layout::vertical([
+            Constraint::Length(1 + avisos.len() as u16),
+            Constraint::Length(u16::from(hay_filtro)),
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(alto_detalle),
-            Constraint::Length(if hay_filtro { 1 } else { 0 }),
         ])
-        .areas(dentro);
-        f.render_widget(Paragraph::new(arriba), a_arriba);
+        .areas(area);
+        let fila0 = Rect { height: a_arriba.height.min(1), ..a_arriba };
+        let usado = Line::from(l0.clone()).width();
+        f.render_widget(Paragraph::new(Line::from(l0)), fila0);
+        // A la derecha, si caben, las teclas de buscar y de los años (abajo no siempre caben).
+        if !self.buscando {
+            let t = if self.todos { "solo el año" } else { "todos los años" };
+            let teclas = [linea_atajos(&[("/", "buscar"), ("t", t)]), linea_atajos(&[("t", t)])].into_iter().find(|l| usado + 5 + l.width() <= area.width as usize);
+            if let Some(l) = teclas {
+                f.render_widget(Paragraph::new(l.right_aligned()), fila0);
+            }
+        }
+        f.render_widget(Paragraph::new(avisos), Rect { y: a_arriba.y + 1, height: a_arriba.height.saturating_sub(1), ..a_arriba });
 
         if hay_filtro {
-            let [etq, txt] = Layout::horizontal([Constraint::Length(8), Constraint::Min(1)]).areas(a_busca);
-            f.render_widget(Paragraph::new(Span::styled("Buscar: ", Style::new().fg(tema::ACENTO))), etq);
-            self.busca.dibujar(f, txt, self.buscando, Style::new());
+            let [etq, txt] = Layout::horizontal([Constraint::Length(7), Constraint::Min(1)]).areas(a_busca);
+            f.render_widget(Paragraph::new(Span::styled("buscar", gris)), etq);
+            self.busca.dibujar(f, txt, self.buscando, negrita);
         }
 
         if vis.is_empty() {
@@ -371,85 +392,53 @@ impl Declaraciones {
             return;
         }
 
-        // Columnas según el ancho: primero se quita el justificante (está abajo), luego se acorta el nombre y luego la hora.
+        // Columnas según el ancho: primero se quita el justificante (está abajo) y luego se acorta el nombre.
+        const ESPACIO: u16 = 2;
         let w = a_tabla.width as usize;
         let largo = vis.iter().map(|&i| nombre_modelo(&self.filas[i].d.modelo, false).chars().count()).max().unwrap_or(0).max(6);
         let corto = vis.iter().map(|&i| nombre_modelo(&self.filas[i].d.modelo, true).chars().count()).max().unwrap_or(0).max(6);
-        let anio_w = if self.todos { 5 } else { 0 };
-        // fijo = símbolo de elegida (2) + año + modelo + periodo + fecha + justificante + PDF + espacios; la nota, al menos 12.
-        let fijo = |nombre: usize, fecha: usize, just: bool| 2 + anio_w + 5 + nombre + 1 + 8 + fecha + 1 + if just { 14 } else { 0 } + 4 + 12;
-        let (nombre_w, fecha_w, con_just) = primera_que_cabe(
+        let fechas: Vec<String> = vis.iter().map(|&i| fecha_lista(&self.filas[i].d)).collect();
+        let fecha_w = fechas.iter().map(|s| s.chars().count()).max().unwrap_or(0).max("presentada".len());
+        let anio_w = if self.todos { 4 + ESPACIO as usize } else { 0 };
+        // fijo = año + modelo + nombre + periodo + fecha + justificante + PDF, con sus espacios; el estado, al menos 12.
+        let e = ESPACIO as usize;
+        let fijo = |nombre: usize, just: bool| anio_w + 6 + e + nombre + e + 7 + e + fecha_w + e + if just { 13 + e } else { 0 } + 3 + e + 12;
+        let (nombre_w, con_just) = primera_que_cabe(
             w,
-            &[
-                (fijo(largo, 17, true), (largo, 17, true)),
-                (fijo(largo, 17, false), (largo, 17, false)),
-                (fijo(corto, 17, false), (corto, 17, false)),
-                (fijo(corto, 11, false), (corto, 11, false)),
-                (0, (corto.min(8), 10, false)),
-            ],
+            &[(fijo(largo, true), (largo, true)), (fijo(largo, false), (largo, false)), (fijo(corto, false), (corto, false)), (0, (corto.min(8), false))],
         );
         let nombre_corto = nombre_w < largo;
-        let nota_w = w.saturating_sub(fijo(nombre_w, fecha_w, con_just) - 12);
+        let estado_w = w.saturating_sub(fijo(nombre_w, con_just) - 12);
 
         let mut cab = Vec::new();
         if self.todos {
-            cab.push(Cell::from("Año"));
+            cab.push(Cell::from("año"));
         }
-        cab.extend([Cell::from("Mod."), Cell::from("Nombre"), Cell::from("Periodo"), Cell::from("Presentada")]);
+        cab.extend([Cell::from("modelo"), Cell::from("nombre"), Cell::from("periodo"), Cell::from("presentada")]);
         if con_just {
-            cab.push(Cell::from("Justificante"));
+            cab.push(Cell::from("justificante"));
         }
-        cab.extend([Cell::from("PDF"), Cell::from("")]);
+        cab.extend([Cell::from("PDF"), Cell::from("estado")]);
 
         let filas: Vec<Row> = vis
             .iter()
-            .map(|&i| {
+            .zip(fechas)
+            .map(|(&i, fecha)| {
                 let x = &self.filas[i];
                 let d = &x.d;
                 let mut c: Vec<Cell> = Vec::new();
                 if self.todos {
                     c.push(Cell::from(d.ejercicio.to_string()));
                 }
-                c.push(Cell::from(Span::styled(codigo(&d.modelo).to_string(), Style::new().add_modifier(Modifier::BOLD))));
-                c.push(Cell::from(Span::styled(nombre_modelo(&d.modelo, nombre_corto), tema::apagado())));
+                c.push(Cell::from(Span::styled(codigo(&d.modelo).to_string(), negrita)));
+                c.push(Cell::from(nombre_modelo(&d.modelo, nombre_corto)));
                 c.push(Cell::from(nombre_periodo(d)));
-                let dia = d.fecha.get(..10).unwrap_or(&d.fecha);
-                let fecha = match (fecha_w >= 17, hora(&d.fecha)) {
-                    (true, Some(h)) => format!("{} {h}", fmt::fecha_corta(dia)),
-                    _ if fecha_w >= 11 => fmt::fecha_corta(dia),
-                    _ => fmt::dmy(dia),
-                };
-                c.push(Cell::from(fecha));
+                c.push(Cell::from(Span::styled(fecha, gris)));
                 if con_just {
-                    c.push(Cell::from(Span::styled(d.justificante.clone(), tema::apagado())));
+                    c.push(Cell::from(Span::styled(d.justificante.clone(), gris)));
                 }
-                // El PDF (● suyo, ○ otro del periodo, — ninguno) y si la app lo ha leído (✓ sí, ✗ no se puede, … aún no).
-                let mut pdf = vec![match (&x.pdf, x.exacto) {
-                    (Some(_), true) => Span::styled(" ●", Style::new().fg(tema::BIEN)),
-                    (Some(_), false) => Span::styled(" ○", Style::new().fg(tema::AVISO)),
-                    (None, _) => Span::styled(" —", tema::apagado()),
-                }];
-                pdf.push(match x.lectura {
-                    Lectura::Leida => Span::styled("✓", Style::new().fg(tema::BIEN)),
-                    Lectura::Fallo(..) => Span::styled("✗", Style::new().fg(tema::MAL)),
-                    Lectura::Pendiente(_) => Span::styled("…", tema::apagado()),
-                    Lectura::NoLee | Lectura::SinPdf => Span::raw(""),
-                });
-                c.push(Cell::from(Line::from(pdf)));
-                let nota = if !d.anterior.is_empty() {
-                    let t = [format!("corrige la {}", d.anterior), "corrige la anterior".into(), "corrige otra".into()]
-                        .into_iter()
-                        .find(|t| t.chars().count() <= nota_w)
-                        .unwrap_or_else(|| "corrige".into());
-                    Span::styled(t, Style::new().fg(tema::ACENTO))
-                } else if x.corregida {
-                    Span::styled(if nota_w >= 17 { "corregida después" } else { "corregida" }, tema::apagado())
-                } else if matches!(x.lectura, Lectura::Fallo(..)) {
-                    Span::styled("no se lee", Style::new().fg(tema::MAL))
-                } else {
-                    Span::raw("")
-                };
-                c.push(Cell::from(nota));
+                c.push(Cell::from(simbolo_pdf(x)));
+                c.push(Cell::from(estado(x, estado_w)));
                 Row::new(c)
             })
             .collect();
@@ -458,91 +447,43 @@ impl Declaraciones {
         if self.todos {
             anchos.push(Constraint::Length(4));
         }
-        anchos.extend([Constraint::Length(4), Constraint::Length(nombre_w as u16), Constraint::Length(7), Constraint::Length(fecha_w as u16)]);
+        anchos.extend([Constraint::Length(6), Constraint::Length(nombre_w as u16), Constraint::Length(7), Constraint::Length(fecha_w as u16)]);
         if con_just {
             anchos.push(Constraint::Length(13));
         }
         anchos.extend([Constraint::Length(3), Constraint::Min(0)]);
 
-        let tabla = Table::new(filas, anchos)
-            .header(Row::new(cab).style(tema::cabecera_tabla()))
-            .column_spacing(1)
-            .row_highlight_style(tema::seleccion())
-            .highlight_symbol("› ");
+        let tabla = Table::new(filas, anchos).header(Row::new(cab).style(tema::cabecera_tabla())).column_spacing(ESPACIO).row_highlight_style(tema::seleccion());
         self.estado.select(Some(self.sel));
         f.render_stateful_widget(tabla, a_tabla, &mut self.estado);
 
-        // Abajo: la elegida, entera.
-        if let Some(x) = self.elegida() {
-            let d = &x.d;
-            let mut l1 = vec![
-                Span::styled(format!("{} {}", codigo(&d.modelo), nombre_modelo(&d.modelo, false)), Style::new().add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    format!(
-                        " · {} · presentada {}",
-                        if es_censal(&d.modelo) { d.ejercicio.to_string() } else { format!("{} {}", nombre_periodo(d), d.ejercicio) },
-                        cuando(&d.fecha)
-                    ),
-                    tema::apagado(),
-                ),
-            ];
-            if x.corregida {
-                l1.push(Span::styled(" · hay otra posterior", tema::apagado()));
-            }
-            let mut l2 = vec![Span::styled(format!("Justificante {}", d.justificante), tema::apagado())];
-            if !d.csv.is_empty() {
-                l2.push(Span::styled(format!(" · CSV {}", d.csv), tema::apagado()));
-            }
-            if !d.anterior.is_empty() {
-                l2.push(Span::styled(format!(" · complementaria o sustitutiva de la {}", d.anterior), Style::new().fg(tema::ACENTO)));
-            }
-            let nombre = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let mut l3 = match (&x.pdf, x.exacto) {
-                (Some(p), true) => vec![Span::styled("● ", Style::new().fg(tema::BIEN)), Span::styled(format!("PDF guardado: {}", nombre(p)), tema::apagado())],
-                (Some(p), false) => vec![
-                    Span::styled("○ ", Style::new().fg(tema::AVISO)),
-                    Span::styled(format!("Hay un PDF de ese periodo ({}), puede que de otra versión", nombre(p)), tema::apagado()),
-                ],
-                (None, _) => vec![Span::styled("— Sin PDF: se descarga al traer lo último con tu certificado.", tema::apagado())],
-            };
-            let mut l4 = None;
-            match &x.lectura {
-                Lectura::Leida => l3.push(Span::styled(" · leída ✓", Style::new().fg(tema::BIEN))),
-                Lectura::Fallo(m) => {
-                    l3.push(Span::styled(" · no se lee ✗", Style::new().fg(tema::MAL)));
-                    l4 = Some(Line::styled(format!("No se puede leer: {m}"), Style::new().fg(tema::MAL)));
-                }
-                Lectura::Pendiente(true) => l3.push(Span::styled(" · leyéndola…", tema::apagado())),
-                Lectura::Pendiente(false) => l3.push(Span::styled(" · sin leer", tema::apagado())),
-                Lectura::NoLee | Lectura::SinPdf => {}
-            }
-            let mut v = vec![Line::from(l1), Line::from(l2), Line::from(l3)];
-            v.extend(l4);
-            f.render_widget(Paragraph::new(v), a_detalle);
-        }
+        // Abajo, tras una fila de aire: la elegida, entera (partida si no cabe).
+        let a_elegida = Rect { y: a_detalle.y + 1, height: a_detalle.height.saturating_sub(1), ..a_detalle };
+        f.render_widget(Paragraph::new(elegida).wrap(Wrap { trim: false }), a_elegida);
     }
 
     /// Qué decir cuando no hay nada que enseñar.
     fn vacia(&self, ctx: &Ctx, c: &Consulta) -> Vec<Line<'static>> {
         let como = "Se consulta con tu certificado: pulsa S para traerlo.";
+        let negrita = Style::new().add_modifier(Modifier::BOLD);
         if !self.busca.valor.is_empty() && !self.filas.is_empty() {
             return vec![Line::styled(format!("Nada con «{}».", self.busca.valor), tema::apagado())];
         }
         if self.todos {
-            return vec![Line::from("No se ha consultado ningún año con Hacienda.".to_string()).bold(), Line::from(""), Line::styled(como, tema::apagado())];
+            return vec![Line::styled("No se ha consultado ningún año con Hacienda.", negrita), Line::from(""), Line::styled(como, tema::apagado())];
         }
         match c {
             Consulta::Nunca => vec![
-                Line::from(format!("No se ha consultado {} con Hacienda.", ctx.anio)).bold(),
+                Line::styled(format!("No se ha consultado {} con Hacienda.", ctx.anio), negrita),
                 Line::from(""),
                 Line::styled(como, tema::apagado()),
                 Line::from(""),
-                Line::styled("Con «a» ves lo de todos los años consultados.", tema::apagado()),
+                Line::styled("Con «t» ves lo de todos los años consultados.", tema::apagado()),
             ],
             _ => {
                 let ms = modelos_consultados(&ctx.datos, ctx.anio);
                 vec![
-                    Line::from(format!("Hacienda no tiene ninguna declaración tuya de {}.", ctx.anio)).bold(),
+                    Line::styled(format!("Hacienda no tiene ninguna declaración tuya de {}.", ctx.anio), negrita),
                     Line::from(""),
                     Line::styled(format!("Modelos consultados: {}.", if ms.is_empty() { "ninguno".into() } else { ms.join(", ") }), tema::apagado()),
                 ]
@@ -551,8 +492,103 @@ impl Declaraciones {
     }
 }
 
-/* ---------------- Seguridad Social y censales ---------------- */
+/// La elegida, entera: qué es, cuándo se presentó (con la hora), su justificante y su CSV (y si corrige otra), su
+/// PDF y cómo lo ha leído la app (y, si no se puede, por qué).
+fn lineas_elegida(x: &Fila) -> Vec<Line<'static>> {
+    let d = &x.d;
+    let mut l1 = vec![
+        Span::styled(format!("{} {}", codigo(&d.modelo), nombre_modelo(&d.modelo, false)), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(
+                " · {} · presentada {}",
+                if es_censal(&d.modelo) { d.ejercicio.to_string() } else { format!("{} {}", nombre_periodo(d), d.ejercicio) },
+                cuando(&d.fecha)
+            ),
+            tema::apagado(),
+        ),
+    ];
+    if x.corregida {
+        l1.push(Span::styled(" · hay otra posterior", tema::apagado()));
+    }
+    let mut l2 = vec![Span::styled(format!("justificante {}", d.justificante), tema::apagado())];
+    if !d.csv.is_empty() {
+        l2.push(Span::styled(format!(" · CSV {}", d.csv), tema::apagado()));
+    }
+    if !d.anterior.is_empty() {
+        l2.push(Span::styled(format!(" · complementaria o sustitutiva de la {}", d.anterior), Style::new().fg(tema::acento())));
+    }
+    let nombre = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mut l3 = match (&x.pdf, x.exacto) {
+        (Some(p), true) => vec![Span::styled("● ", Style::new().fg(tema::BIEN)), Span::styled(format!("PDF guardado: {}", nombre(p)), tema::apagado())],
+        (Some(p), false) => vec![
+            Span::styled("○ ", Style::new().fg(tema::AVISO)),
+            Span::styled(format!("Hay un PDF de ese periodo ({}), puede que de otra versión", nombre(p)), tema::apagado()),
+        ],
+        (None, _) => vec![Span::styled("— Sin PDF: se descarga al traer lo último con tu certificado.", tema::apagado())],
+    };
+    let mut l4 = None;
+    match &x.lectura {
+        Lectura::Leida => l3.push(Span::styled(" · leída ✓", Style::new().fg(tema::BIEN))),
+        Lectura::Fallo(m) => {
+            l3.push(Span::styled(" · no se lee ✗", Style::new().fg(tema::MAL)));
+            l4 = Some(Line::styled(format!("No se puede leer: {m}"), Style::new().fg(tema::MAL)));
+        }
+        Lectura::Pendiente(true) => l3.push(Span::styled(" · leyéndola…", tema::apagado())),
+        Lectura::Pendiente(false) => l3.push(Span::styled(" · sin leer", tema::apagado())),
+        Lectura::NoLee | Lectura::SinPdf => {}
+    }
+    let mut v = vec![Line::from(l1), Line::from(l2), Line::from(l3)];
+    v.extend(l4);
+    v
+}
 
+/// Cuándo se presentó, en corto: «14 oct» si es del año de la declaración; si no, con el año: «28 ene 2027». (La
+/// hora, en la elegida.)
+fn fecha_lista(d: &Decl) -> String {
+    let dia = d.fecha.get(..10).unwrap_or(&d.fecha);
+    let c = fmt::fecha_corta(dia);
+    match c.rsplit_once(' ') {
+        Some((dm, _)) if fmt::anio_de(dia) == d.ejercicio => dm.to_string(),
+        _ => c,
+    }
+}
+
+/// Dónde está el PDF: ● el suyo (en BIEN), ○ otro del mismo periodo (en AVISO), — ninguno.
+fn simbolo_pdf(x: &Fila) -> Span<'static> {
+    match (&x.pdf, x.exacto) {
+        (Some(_), true) => Span::styled(" ●", Style::new().fg(tema::BIEN)),
+        (Some(_), false) => Span::styled(" ○", Style::new().fg(tema::AVISO)),
+        (None, _) => Span::styled(" —", tema::apagado()),
+    }
+}
+
+/// El estado de una declaración en `w` columnas: cómo ha leído la app su PDF («✓ leída» en BIEN, «✗ no se lee» en
+/// MAL, «sin leer» en gris) y, si la hay, su nota: si corrige otra (en el color de la sección) o si la corrigió una
+/// posterior; la nota, tan larga como quepa.
+fn estado(x: &Fila, w: usize) -> Line<'static> {
+    let gris = tema::apagado();
+    let mut v = match x.lectura {
+        Lectura::Leida => vec![Span::styled("✓ leída", Style::new().fg(tema::BIEN))],
+        Lectura::Fallo(..) => vec![Span::styled("✗ no se lee", Style::new().fg(tema::MAL))],
+        Lectura::Pendiente(true) => vec![Span::styled("leyéndola…", gris)],
+        Lectura::Pendiente(false) => vec![Span::styled("sin leer", gris)],
+        Lectura::NoLee | Lectura::SinPdf => vec![],
+    };
+    let d = &x.d;
+    let (notas, st) = if !d.anterior.is_empty() {
+        (vec![format!("corrige la {}", d.anterior), "corrige la anterior".into(), "corrige otra".into(), "corrige".into()], Style::new().fg(tema::acento()))
+    } else if x.corregida {
+        (vec!["corregida después".to_string(), "corregida".into()], gris)
+    } else {
+        (vec![], gris)
+    };
+    let sep = if v.is_empty() { "" } else { " · " };
+    let libre = w.saturating_sub(Line::from(v.clone()).width() + sep.chars().count());
+    if let Some(nota) = notas.iter().find(|t| t.chars().count() <= libre).or(notas.last()) {
+        v.push(Span::styled(format!("{sep}{nota}"), st));
+    }
+    Line::from(v)
+}
 
 impl Pantalla for Declaraciones {
     fn titulo(&self) -> &'static str {
@@ -614,7 +650,7 @@ impl Pantalla for Declaraciones {
         let lista = true;
         match k.code {
             KeyCode::Char('/') => self.buscando = true,
-            KeyCode::Char('a') => {
+            KeyCode::Char('t') => {
                 self.todos = !self.todos;
                 self.refrescar(ctx);
             }
@@ -643,7 +679,7 @@ impl Pantalla for Declaraciones {
             return vec![("Esc", "volver"), ("↑↓", "moverse"), ("o", "abrir PDF")];
         }
         let mut v = vec![("Enter", "casillas"), ("o", "abrir PDF"), ("/", "buscar")];
-        v.push(("a", if self.todos { "solo el año" } else { "todos los años" }));
+        v.push(("t", if self.todos { "solo el año" } else { "todos los años" }));
         if !self.busca.valor.is_empty() {
             v.push(("Esc", "quitar filtro"));
         }
@@ -673,5 +709,44 @@ impl Pantalla for Declaraciones {
                 x.lectura = lectura(ctx, &x.d, x.pdf.as_ref());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dominio::hacienda::{Consulta, Decl, Modelo};
+    use crate::tui::prueba::{app, ir, pantalla, teclas};
+
+    fn decl(m: &str, y: i32, p: &str, fecha: &str, n: u32, anterior: &str) -> Decl {
+        Decl { modelo: m.into(), ejercicio: y, periodo: p.into(), csv: format!("CSV{n}"), justificante: format!("{m}{n:010}"), fecha: fecha.into(), anterior: anterior.into() }
+    }
+
+    /// La lista, sin caja: el año y cuántas arriba, la cabecera en minúscula, las fechas cortas (con el año solo si
+    /// no es el de la declaración), si corrige otra o la corrigieron y, abajo, la elegida entera (con la hora).
+    #[test]
+    fn la_lista_sin_caja() {
+        let mut a = app();
+        let renta = |fecha: &str, n: u32, anterior: &str| decl("100", 2025, "0A", fecha, n, anterior);
+        let modelos = [
+            ("100".to_string(), Modelo { fecha: "2026-06-01T10:00:00".into(), decl: vec![renta("2026-05-02T20:30:00", 1, ""), renta("2026-05-20T08:30:00", 2, "1000000000001")] }),
+            ("303".to_string(), Modelo { fecha: "2026-06-01T10:00:00".into(), decl: vec![decl("303", 2025, "3T", "2025-10-15T10:00:00", 3, "")] }),
+        ];
+        a.ctx.datos.hacienda.insert(2025, Consulta { fecha: "2026-06-01T10:00:00".into(), modelos: modelos.into_iter().collect(), ..Default::default() });
+        a.ctx.anio = 2025;
+        ir(&mut a, "Declaraciones");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("2025 · 3 declaraciones · consultado con Hacienda el 1 jun 2026 a las 10:00"), "{p}");
+        assert!(p.contains("modelo  nombre") && p.contains("presentada") && p.contains("estado"), "{p}");
+        assert!(p.contains("2 may 2026") && p.contains("15 oct ") && !p.contains("15 oct 2025"), "fechas cortas:\n{p}");
+        assert!(p.contains("corregida después") && p.contains("corrige la 1000000000001"), "{p}");
+        assert!(p.contains("100 Renta · Anual 2025 · presentada el 2 may 2026 a las 20:30 · hay otra posterior"), "la elegida, entera:\n{p}");
+        assert!(!p.contains('┌') && !p.contains('│'), "sin caja:\n{p}");
+        // A 80×24 también caben las columnas que importan.
+        let p = pantalla(&mut a, 80, 24);
+        assert!(p.contains("Renta") && p.contains("estado") && p.contains("corrige"), "{p}");
+        // Y con «t», todos los años.
+        teclas(&mut a, "t");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("todos los años · consultados con Hacienda: 2025–2025 · 3 declaraciones") && p.contains("año   modelo"), "{p}");
     }
 }

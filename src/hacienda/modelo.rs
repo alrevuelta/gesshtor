@@ -214,12 +214,30 @@ pub enum Fallo {
     Numeracion(i32),
     /// No hay ninguna casilla con importe.
     SinCasillas,
+    /// No se ve el devengo (el ejercicio y el periodo) en el impreso.
+    SinDevengo(Modelo),
+    /// No se ven casillas que salen en todos los PDF de ese modelo (`Formulario::ANCLAS`).
+    FaltaCasilla { modelo: Modelo, faltan: Vec<u32>, vistas: Vec<u32> },
+    /// La portada no dice nada que se entienda de cómo se presentó (a ingresar, a compensar…).
+    SinTipo(Modelo),
+    /// En la Renta, un bloque (trabajo, capital, actividad…) tiene sus casillas pero no cuadran entre sí.
+    Bloque { bloque: &'static str, regla: String, casillas: Vec<(u32, f64)> },
+    /// Lo leído de la Renta no cuadra consigo mismo (las comprobaciones de `modelo_100::comprobar`).
+    Incoherente(Vec<String>),
     /// Lo leído no cuadra con las sumas del propio modelo en estas casillas.
-    NoCuadra { modelo: Modelo, casillas: Vec<u32> },
+    NoCuadra { modelo: Modelo, casillas: Vec<Descuadre> },
     /// El PDF no se puede abrir.
     Pdf(String),
-    /// El lector se ha roto con este PDF (un fallo de la app).
-    Roto,
+    /// El lector se ha roto con este PDF (un fallo de la app): lo que dijo al romperse.
+    Roto(String),
+}
+
+/// Una casilla que no cuadra: lo leído y lo que debería valer según las demás.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Descuadre {
+    pub casilla: u32,
+    pub leido: f64,
+    pub debe: f64,
 }
 
 impl fmt::Display for Fallo {
@@ -242,13 +260,122 @@ impl fmt::Display for Fallo {
             Fallo::NoEsLaRenta(a) => write!(f, "El PDF no es la Renta de {a}."),
             Fallo::Numeracion(a) => write!(f, "No reconozco la numeración de las casillas de la Renta de {a}."),
             Fallo::SinCasillas => f.write_str("No encuentro las casillas en el PDF."),
+            Fallo::SinDevengo(m) => write!(f, "No encuentro en el PDF de qué ejercicio y periodo es (el devengo del {m})."),
+            Fallo::FaltaCasilla { modelo, faltan, .. } => {
+                let n = modelo.cifras();
+                let v: Vec<String> = faltan.iter().map(|c| format!("{c:0n$}")).collect();
+                let (s, que) = if v.len() > 1 { ("s", "salen") } else { ("", "sale") };
+                write!(f, "No encuentro en el PDF la casilla{s} {}, que {que} en todos los del {modelo}.", v.join(", "))
+            }
+            Fallo::SinTipo(m) => write!(f, "No entiendo en la portada del {m} cómo se presentó (a ingresar, a compensar, a devolver…)."),
+            Fallo::Bloque { bloque, regla, .. } => write!(f, "En la Renta, lo de {bloque} no cuadra: {regla}."),
+            Fallo::Incoherente(mal) => write!(f, "Lo que he leído de la Renta no cuadra consigo mismo: {}.", mal.join("; ")),
             Fallo::NoCuadra { modelo, casillas } => {
                 let n = modelo.cifras();
-                let v: Vec<String> = casillas.iter().map(|c| format!("{c:0n$}")).collect();
+                let v: Vec<String> = casillas.iter().map(|c| format!("{:0n$}", c.casilla)).collect();
                 write!(f, "Lo que he leído no cuadra (casilla{} {}).", if v.len() > 1 { "s" } else { "" }, v.join(", "))
             }
             Fallo::Pdf(e) => f.write_str(e),
-            Fallo::Roto => f.write_str("El lector se ha roto con este PDF."),
+            Fallo::Roto(_) => f.write_str("El lector se ha roto con este PDF."),
+        }
+    }
+}
+
+/// Para el informe de un fallo (`dominio::fallo`): su código, el código que lo lee y qué se esperaba y qué se
+/// encontró. Lo que sale del texto del PDF (el fragmento) lo pone `lectura`.
+impl Fallo {
+    /// Un código estable, con el modelo si se sabe: «AEAT_303_NO_CUADRA».
+    pub fn codigo(&self) -> String {
+        let (modelo, que) = match self {
+            Fallo::Anterior(m) => (Some(*m), "ANTERIOR"),
+            Fallo::Periodo { modelo, .. } => (Some(*modelo), "PERIODO"),
+            Fallo::SinDiseno { modelo, .. } => (Some(*modelo), "SIN_DISENO"),
+            Fallo::OtroModelo { pedido, .. } => (Some(*pedido), "OTRO_MODELO"),
+            Fallo::OtroPeriodo { .. } => (None, "OTRO_PERIODO"),
+            Fallo::NoEsLaRenta(_) => (Some(Modelo::M100), "NO_ES_LA_RENTA"),
+            Fallo::Numeracion(_) => (Some(Modelo::M100), "NUMERACION"),
+            Fallo::SinCasillas => (None, "SIN_CASILLAS"),
+            Fallo::SinDevengo(m) => (Some(*m), "SIN_DEVENGO"),
+            Fallo::FaltaCasilla { modelo, .. } => (Some(*modelo), "FALTA_CASILLA"),
+            Fallo::SinTipo(m) => (Some(*m), "SIN_TIPO"),
+            Fallo::Bloque { .. } => (Some(Modelo::M100), "BLOQUE_NO_CUADRA"),
+            Fallo::Incoherente(_) => (Some(Modelo::M100), "INCOHERENTE"),
+            Fallo::NoCuadra { modelo, .. } => (Some(*modelo), "NO_CUADRA"),
+            Fallo::Pdf(_) => (None, "PDF_NO_SE_ABRE"),
+            Fallo::Roto(_) => (None, "LECTOR_ROTO"),
+        };
+        match modelo {
+            Some(m) => format!("AEAT_{m}_{que}"),
+            None => format!("AEAT_{que}"),
+        }
+    }
+
+    /// El código que lo lee (fichero y función; la prueba `los_sitios_existen` comprueba que existen).
+    pub fn donde(&self) -> String {
+        let s = match self {
+            Fallo::Bloque { bloque, .. } => return format!("src/hacienda/modelo_100.rs · {bloque} (dentro de leer)"),
+            Fallo::Anterior(Modelo::M100) | Fallo::NoEsLaRenta(_) => "src/hacienda/modelo_100.rs · leer (es_modelo_100, es_del_anio)",
+            Fallo::Numeracion(_) => "src/hacienda/modelo_100.rs · leer (NUMERACIONES)",
+            Fallo::NoCuadra { modelo: Modelo::M100, .. } => "src/hacienda/modelo_100.rs · leer",
+            Fallo::NoCuadra { .. } => "src/hacienda/formulario.rs · leer → descuadres (las sumas, en `reglas` del modelo_XXX.rs de su modelo)",
+            Fallo::Anterior(_) | Fallo::Periodo { .. } | Fallo::SinDiseno { .. } => "src/hacienda/formulario.rs · leer",
+            Fallo::OtroModelo { .. } => "src/hacienda/formulario.rs · comprobar (el modelo: src/hacienda/generico.rs · modelo)",
+            Fallo::OtroPeriodo { .. } => "src/hacienda/formulario.rs · comprobar (el periodo: devengo)",
+            Fallo::SinCasillas => "src/hacienda/formulario.rs · leer (las casillas: src/hacienda/generico.rs · pares_formulario, letra_rellenada)",
+            Fallo::SinDevengo(_) => "src/hacienda/formulario.rs · devengo (desde comprobar)",
+            Fallo::FaltaCasilla { .. } => "src/hacienda/formulario.rs · leer (las anclas: `ANCLAS` en el modelo_XXX.rs de su modelo; las casillas: src/hacienda/generico.rs · pares_formulario)",
+            Fallo::SinTipo(_) => "src/hacienda/formulario.rs · tipo",
+            Fallo::Incoherente(_) => "src/hacienda/modelo_100.rs · comprobar (dentro de leer)",
+            Fallo::Pdf(_) => "src/hacienda/pdf.rs · desde_bytes",
+            Fallo::Roto(_) => "src/hacienda/lectura.rs · leer_pdf (se ha roto dentro del lector de su modelo)",
+        };
+        s.to_string()
+    }
+
+    /// Qué se esperaba encontrar en el PDF.
+    pub fn esperado(&self) -> String {
+        let de = |(a, p): &(i32, Option<Periodo>)| p.as_ref().map_or(format!("ejercicio {a}"), |p| format!("ejercicio {a}, periodo {p}"));
+        match self {
+            Fallo::OtroModelo { pedido, .. } => format!("el número del modelo {pedido} en la cabecera (en letra grande) o tras «Modelo»"),
+            Fallo::OtroPeriodo { pedido, .. } => format!("el devengo «{}» (lo dice el nombre del PDF)", de(pedido)),
+            Fallo::NoEsLaRenta(a) => format!("«Modelo 100» y el ejercicio {a} («Ejercicio {a}», «…Físicas {a}» o la referencia «{a}100…»)"),
+            Fallo::Numeracion(_) => "cuota diferencial (0610) = cuota resultante (0595) − pagos a cuenta (0609), y el resultado (0670)".into(),
+            Fallo::SinCasillas => "números de casilla con su importe a la derecha, en la misma línea y en la letra de los importes rellenados".into(),
+            Fallo::NoCuadra { modelo, casillas } => {
+                let n = modelo.cifras();
+                casillas.iter().map(|c| format!("{:0n$} = {:.2} (según las demás casillas)", c.casilla, c.debe)).collect::<Vec<_>>().join("; ")
+            }
+            Fallo::SinDevengo(_) => "«Ejercicio AAAA Período PP» (o «AAAA PP») en el impreso, fuera de la portada".into(),
+            Fallo::FaltaCasilla { modelo, faltan, .. } => {
+                let n = modelo.cifras();
+                format!("las casillas {} con su importe", faltan.iter().map(|c| format!("{c:0n$}")).collect::<Vec<_>>().join(", "))
+            }
+            Fallo::SinTipo(_) => "en la portada: A INGRESAR / NRC, A COMPENSAR, A DEVOLVER, DOMICILIA…, RECONOCIMIENTO DE DEUDA, NEGATIVA, SIN ACTIVIDAD o RESULTADO CERO".into(),
+            Fallo::Bloque { regla, .. } => regla.clone(),
+            Fallo::Incoherente(mal) => mal.join("; "),
+            Fallo::Pdf(_) => "un PDF que se pueda abrir".into(),
+            Fallo::Roto(_) => "que el lector no se rompa".into(),
+            Fallo::Anterior(_) | Fallo::Periodo { .. } | Fallo::SinDiseno { .. } => String::new(),
+        }
+    }
+
+    /// Qué se encontró (lo que se sabe sin el texto del PDF).
+    pub fn encontrado(&self) -> String {
+        match self {
+            Fallo::OtroModelo { es: Some(es), .. } => format!("el modelo {es}"),
+            Fallo::OtroModelo { es: None, .. } => "ningún número de modelo".into(),
+            Fallo::OtroPeriodo { es: (a, p), .. } => p.as_ref().map_or(format!("ejercicio {a}"), |p| format!("ejercicio {a}, periodo {p}")),
+            Fallo::NoCuadra { modelo, casillas } => {
+                let n = modelo.cifras();
+                casillas.iter().map(|c| format!("{:0n$} = {:.2}", c.casilla, c.leido)).collect::<Vec<_>>().join("; ")
+            }
+            Fallo::FaltaCasilla { modelo, vistas, .. } => {
+                let n = modelo.cifras();
+                format!("las casillas que se ven: {}", vistas.iter().map(|c| format!("{c:0n$}")).collect::<Vec<_>>().join(", "))
+            }
+            Fallo::Bloque { casillas, .. } => casillas.iter().map(|(c, x)| format!("{c:04} = {x:.2}")).collect::<Vec<_>>().join("; "),
+            Fallo::Roto(e) => format!("el lector se ha roto: {e}"),
+            _ => String::new(),
         }
     }
 }
@@ -269,174 +396,60 @@ mod tests {
         assert_eq!(Periodo::de("07"), Periodo::Mes(7));
         assert_eq!(Periodo::de("5T"), Periodo::Otro("5T".into()));
         assert_eq!(Trimestre::new(0), None);
-        assert_eq!(Fallo::NoCuadra { modelo: Modelo::M303, casillas: vec![3, 110] }.to_string(), "Lo que he leído no cuadra (casillas 03, 110).");
-        assert_eq!(Fallo::NoCuadra { modelo: Modelo::M100, casillas: vec![685] }.to_string(), "Lo que he leído no cuadra (casilla 0685).");
-    }
-}
-
-#[cfg(test)]
-mod como_la_web {
-    //! Los cálculos (IRPF acumulado, IVA de un periodo, 303 y 130) comparados con lo que calculaba la app web de la
-    //! que salió la app, con los mismos datos: `pruebas/<caso>/web.json` es su resultado, guardado; aquí se compara
-    //! cada número (tolerancia 0,005). Los trimestres se encadenan: casillas 05/15 del 130 con los 130 anteriores
-    //! del año; casilla 110 del 303 con las 87/71 del trimestre anterior.
-    use super::{Memo, Modelo, Trimestral};
-    use crate::dominio::fmt::{periodo, r2};
-    use crate::dominio::Casillas;
-    use crate::hacienda::irpf::{irpf_acumulado, Acumulado};
-    use crate::hacienda::modelo_130::{self, OrigenRn, PorQue};
-    use crate::hacienda::modelo_303::{self, Negativo};
-    use serde_json::Value;
-    use std::path::{Path, PathBuf};
-
-    fn dir_crate() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let d = |casilla| Descuadre { casilla, leido: 1.0, debe: 2.5 };
+        let f = Fallo::NoCuadra { modelo: Modelo::M303, casillas: vec![d(3), d(110)] };
+        assert_eq!(f.to_string(), "Lo que he leído no cuadra (casillas 03, 110).");
+        assert_eq!((f.codigo().as_str(), f.esperado().as_str(), f.encontrado().as_str()), ("AEAT_303_NO_CUADRA", "03 = 2.50 (según las demás casillas); 110 = 2.50 (según las demás casillas)", "03 = 1.00; 110 = 1.00"));
+        assert_eq!(Fallo::NoCuadra { modelo: Modelo::M100, casillas: vec![d(685)] }.to_string(), "Lo que he leído no cuadra (casilla 0685).");
+        assert_eq!(Fallo::SinCasillas.codigo(), "AEAT_SIN_CASILLAS");
     }
 
-    /// Lo que calculó la web para un caso.
-    fn referencia(caso: &Path) -> Value {
-        serde_json::from_str(&std::fs::read_to_string(caso.join("web.json")).unwrap()).unwrap()
-    }
-
-    /// Cómo lo escribía la web.
-    fn origen_rn(o: OrigenRn) -> &'static str {
-        match o {
-            OrigenRn::Escrito => "manual",
-            OrigenRn::Alta => "alta",
-            OrigenRn::Calculado => "app",
-            OrigenRn::NoSe => "desconocido",
-        }
-    }
-
-    fn por_que(p: PorQue) -> &'static str {
-        match p {
-            PorQue::AnioAnterior => "anterior",
-            PorQue::Trimestre => "trimestre",
-            PorQue::TrimestreSinAnterior => "trimestre-sin-datos",
-            PorQue::SinDatos => "sin-datos",
-        }
-    }
-
-    #[derive(Default)]
-    struct Cmp {
-        n: usize,
-        fallos: Vec<String>,
-    }
-
-    impl Cmp {
-        fn num(&mut self, ruta: &str, js: &Value, rs: f64) {
-            self.n += 1;
-            if !js.as_f64().is_some_and(|j| (j - rs).abs() < 0.005) {
-                self.fallos.push(format!("{ruta}: web={js} rust={rs}"));
+    /// Los ficheros y las funciones que dice `donde` existen (si se cambia el nombre de uno, esto lo dice): cada
+    /// «src/….rs» y, en él, la función que va tras «·» y lo que tenga nombre_con_guiones.
+    pub(crate) fn existe(donde: &str) {
+        let raiz = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (mut fichero, mut tras_punto) = (String::new(), false);
+        for p in donde.split([' ', '(', ')', ',', ':']).filter(|p| !p.is_empty()) {
+            let nombre = p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if p.starts_with("src/") {
+                fichero = std::fs::read_to_string(raiz.join(p)).unwrap_or_else(|_| panic!("no existe {p} ({donde})"));
+            } else if nombre && (tras_punto || p.contains('_')) {
+                assert!(["fn ", "const ", "struct "].iter().any(|k| fichero.contains(&format!("{k}{p}"))), "no está «{p}» ({donde})");
             }
+            tras_punto = p == "·";
         }
-        fn igual<T: PartialEq + std::fmt::Debug>(&mut self, ruta: &str, js: T, rs: T) {
-            self.n += 1;
-            if js != rs {
-                self.fallos.push(format!("{ruta}: web={js:?} rust={rs:?}"));
-            }
-        }
-        fn casillas(&mut self, ruta: &str, js: &Value, rs: &Casillas) {
-            let m = js.as_object().unwrap_or_else(|| panic!("{ruta}: sin casillas"));
-            let claves_js: Vec<u32> = m.keys().map(|k| k.parse().unwrap()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-            let claves_rs: Vec<u32> = rs.keys().copied().collect();
-            self.igual(&format!("{ruta} (casillas)"), claves_js, claves_rs);
-            for (k, v) in m {
-                self.num(&format!("{ruta}[{k}]"), v, rs.get(&k.parse::<u32>().unwrap()).copied().unwrap_or(f64::NAN));
-            }
-        }
-        fn acumulado(&mut self, ruta: &str, js: &Value, a: &Acumulado) {
-            for (k, v) in [
-                ("ingresos", a.ingresos),
-                ("retenciones", a.retenciones),
-                ("ingresosConRet", a.ingresos_con_ret),
-                ("gastos", a.gastos),
-                ("gdj", a.gdj),
-                ("rn", a.rn),
-            ] {
-                self.num(&format!("{ruta}.{k}"), &js[k], v);
-            }
-            let l = js["lineas"].as_object().unwrap();
-            self.igual(&format!("{ruta}.lineas (claves)"), l.len(), a.lineas.len());
-            for (k, v) in l {
-                self.num(&format!("{ruta}.lineas.{k}"), v, a.lineas.get(k.as_str()).copied().unwrap_or(f64::NAN));
-            }
-        }
-    }
-
-    /// Compara todo lo que da la web para un caso con Rust. Devuelve cuántos valores se han comparado.
-    fn comparar(caso: &Path) -> usize {
-        let datos = caso.display();
-        let web = referencia(caso);
-        let mut d = crate::dominio::almacen::cargar(caso).unwrap();
-        // Lo leído de los PDF (estos datos de prueba no tienen PDF: va aparte).
-        if let Ok(t) = std::fs::read_to_string(caso.join("lecturas.json")) {
-            d.lecturas = serde_json::from_str(&t).unwrap();
-        }
-        let mut c = Cmp::default();
-        c.num("primerAnio", &web["primerAnio"], d.primer_anio_con_apuntes() as f64);
-        // Con un memo compartido por todo (como una pantalla que lo enseña todo): tiene que dar lo mismo.
-        let mut memo = Memo::default();
-        let (m303, m130) = (Trimestral::M303, Trimestral::M130);
-        for (y, w) in web["anios"].as_object().unwrap() {
-            let y: i32 = y.parse().unwrap();
-            for (f, a) in w["irpf"].as_object().unwrap() {
-                c.acumulado(&format!("{y} irpf {f}"), a, &irpf_acumulado(&d, y, f));
-            }
-            let rn = modelo_130::rn_anterior(&d, y);
-            c.igual(&format!("{y} rnAnterior.fuente"), w["rnAnterior"]["fuente"].as_str().unwrap(), origen_rn(rn.origen));
-            c.igual(&format!("{y} rnAnterior.valor"), w["rnAnterior"]["valor"].as_f64().map(r2), rn.valor.map(r2));
-            c.igual(&format!("{y} gdjEn130"), w["gdjEn130"].as_bool().unwrap(), modelo_130::con_gdj(&d));
-            let (ini, fin) = (format!("{y}-01-01"), format!("{y}-12-31"));
-            c.casillas(&format!("{y} iva año"), &w["iva"]["anio"], &modelo_303::iva_periodo(&d, &ini, &fin));
-            for q in 0..=4u32 {
-                let (wj, e) = (&w["exento130"][q.to_string()], modelo_130::exento(&d, y, q));
-                c.igual(&format!("{y}-{q}T exento130.exento"), wj["exento"].as_bool().unwrap(), e.exento);
-                c.igual(&format!("{y}-{q}T exento130.fuente"), wj["fuente"].as_str().unwrap(), por_que(e.por_que));
-                c.num(&format!("{y}-{q}T exento130.pct"), &wj["pct"], e.pct);
-                c.igual(&format!("{y}-{q}T exento130.sugerido"), wj["sugerido"].as_bool(), e.sugerido);
-            }
-            for q in 1..=4u32 {
-                let k = q.to_string();
-                let r = |m: &str| format!("{y}-{q}T {m}");
-                let (ini, fin) = periodo(y, q);
-                c.casillas(&r("iva"), &w["iva"][&k], &modelo_303::iva_periodo(&d, &ini, &fin));
-                c.casillas(&r("calc303"), &w["calc303"][&k], &m303.calcular(&d, y, q, &mut Memo::default()));
-                c.casillas(&r("get303"), &w["get303"][&k], &m303.cuenta(&d, y, q, &mut Memo::default()));
-                c.casillas(&r("calc130"), &w["calc130"][&k], &m130.calcular(&d, y, q, &mut Memo::default()));
-                c.casillas(&r("get130"), &w["get130"][&k], &m130.cuenta(&d, y, q, &mut Memo::default()));
-                c.casillas(&r("get303 (memo compartido)"), &w["get303"][&k], &m303.cuenta(&d, y, q, &mut memo));
-                c.casillas(&r("get130 (memo compartido)"), &w["get130"][&k], &m130.cuenta(&d, y, q, &mut memo));
-                c.casillas(&r("calc303 (memo compartido)"), &w["calc303"][&k], &m303.calcular(&d, y, q, &mut memo));
-                c.casillas(&r("calc130 (memo compartido)"), &w["calc130"][&k], &m130.calcular(&d, y, q, &mut memo));
-                c.num(&r("pendienteCompensar"), &w["pendiente"][&k], modelo_303::pendiente_compensar(&d, y, q, &mut Memo::default()));
-                let negativo = match modelo_303::negativo(&d, y, q) {
-                    Negativo::Devolver => "devolver",
-                    Negativo::Compensar => "compensar",
-                };
-                c.igual(&r("decision303"), w["decision303"][&k].as_str().unwrap_or(""), negativo);
-                c.igual(&r("no130"), w["no130"][&k].as_bool().unwrap(), modelo_130::se_libra(&d, y, q));
-                for (m, wl) in [(Modelo::M303, &w["leido303"][&k]), (Modelo::M130, &w["leido130"][&k])] {
-                    let l = m.leido(&d, y, q);
-                    c.igual(&r(&format!("leido{m}")), !wl.is_null(), l.is_some());
-                    if let Some(l) = l.filter(|_| !wl.is_null()) {
-                        c.casillas(&r(&format!("leido{m}.casillas")), &wl["casillas"], &l.casillas);
-                        c.igual(&r(&format!("leido{m}.tipo")), wl["tipo"].as_str().unwrap(), l.tipo.map_or("", |t| t.letra()));
-                    }
-                }
-            }
-        }
-        assert!(c.fallos.is_empty(), "{datos}: {} de {} valores distintos de la web:\n{}", c.fallos.len(), c.n, c.fallos.join("\n"));
-        eprintln!("{datos}: {} valores iguales que la web", c.n);
-        c.n
     }
 
     #[test]
-    fn como_la_web() {
-        let mut v: Vec<_> = std::fs::read_dir(dir_crate().join("pruebas")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.join("web.json").is_file()).collect();
-        v.sort();
-        assert_eq!(v.len(), 3);
-        let n: usize = v.iter().map(|p| comparar(p)).sum();
-        assert!(n > 18_000, "solo {n} valores");
+    fn los_sitios_existen() {
+        let p = Periodo::Anual;
+        let todos = [
+            Fallo::Anterior(Modelo::M100),
+            Fallo::Anterior(Modelo::M303),
+            Fallo::Periodo { modelo: Modelo::M303, periodicidad: Periodicidad::Trimestral, periodo: p.clone() },
+            Fallo::SinDiseno { modelo: Modelo::M303, ejercicio: 2020, periodo: p.clone() },
+            Fallo::OtroModelo { pedido: Modelo::M303, es: None },
+            Fallo::OtroPeriodo { pedido: (2020, None), es: (2021, None) },
+            Fallo::NoEsLaRenta(2020),
+            Fallo::Numeracion(2020),
+            Fallo::SinCasillas,
+            Fallo::SinDevengo(Modelo::M303),
+            Fallo::FaltaCasilla { modelo: Modelo::M303, faltan: vec![], vistas: vec![] },
+            Fallo::SinTipo(Modelo::M303),
+            Fallo::Bloque { bloque: "trabajo", regla: String::new(), casillas: vec![] },
+            Fallo::Bloque { bloque: "capital", regla: String::new(), casillas: vec![] },
+            Fallo::Bloque { bloque: "actividad", regla: String::new(), casillas: vec![] },
+            Fallo::Bloque { bloque: "ganancias", regla: String::new(), casillas: vec![] },
+            Fallo::Bloque { bloque: "pagos", regla: String::new(), casillas: vec![] },
+            Fallo::Bloque { bloque: "cuotas", regla: String::new(), casillas: vec![] },
+            Fallo::Incoherente(vec![]),
+            Fallo::NoCuadra { modelo: Modelo::M100, casillas: vec![] },
+            Fallo::NoCuadra { modelo: Modelo::M303, casillas: vec![] },
+            Fallo::Pdf(String::new()),
+            Fallo::Roto(String::new()),
+        ];
+        for f in todos {
+            existe(&f.donde());
+        }
     }
 }
