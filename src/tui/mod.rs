@@ -1,4 +1,4 @@
-//! La app: secciones (Resumen, Empleo, Autónomo, Inversiones, Utilidades) con sus pestañas, el año, la barra de abajo
+//! La app: secciones (Resumen, Empleo, Autónomo, Patrimonio, Utilidades) con sus pestañas, el año, la barra de abajo
 //! y el bucle de teclas. Se navega con la letra de la sección (`r`, `e`, `a`, `i`, `u`) y el número de la pestaña
 //! (`1`, `2`…). Cada pantalla es un fichero de esta carpeta (y sus partes, `anios_*.rs`, `empleo_*.rs`…); el menú,
 //! en `menu.rs`.
@@ -841,7 +841,7 @@ impl App {
     }
 
     /// La barra de abajo. A la izquierda, las teclas de la pantalla (y «- + año» si la pantalla usa el año) y, antes,
-    /// cómo se navega («r e a i u sección   1 2 3 pestaña»; solo con el carril: sin él se ve arriba); a la derecha,
+    /// cómo se navega («r e a p u sección   1 2 3 pestaña»; solo con el carril: sin él se ve arriba); a la derecha,
     /// siempre, «S traer lo último     ? ayuda   q salir». Las de la pantalla van antes que lo demás: si no cabe, se
     /// quitan primero las palabras «sección» y «pestaña», luego lo de navegar, luego «S traer lo último» se queda en
     /// «S traer» y solo entonces se quitan teclas de la pantalla, de la última a la primera. «? ayuda» y «q salir»,
@@ -863,7 +863,7 @@ impl App {
         let gris = tema::apagado();
         let letras: Vec<char> = self.visibles().iter().map(|&i| self.secciones[i].tecla).collect();
         let pestanas = self.secciones[self.activa].pantallas.len();
-        // Lo de navegar: 0, entero; 1, sin las palabras («r e a i u   1 2 3»); 2, nada.
+        // Lo de navegar: 0, entero; 1, sin las palabras («r e a p u   1 2 3»); 2, nada.
         let nav = |nivel: u8| {
             let mut v: Vec<Span<'static>> = Vec::new();
             if nivel >= 2 {
@@ -1113,17 +1113,17 @@ mod tests {
         assert!(filas[1].contains("1 Sueldo     2 Nóminas") && !filas[1].contains("Facturas"), "{p}");
         assert_eq!(filas[2].chars().position(|c| c == '▀'), Some(super::CONTENIDO as usize + "1 Sueldo     ".len()), "{p}");
         // Y abajo, cómo se navega (sin las palabras si no caben con las teclas de la pantalla).
-        assert!(filas[35].starts_with("  r e a i u ") && filas[35].contains("1 2"), "{p}");
+        assert!(filas[35].starts_with("  r e a p u ") && filas[35].contains("1 2"), "{p}");
         // Con la terminal estrecha, arriba: el nombre y las letras de las secciones (la tuya, con su nombre) y,
         // debajo, las pestañas de la tuya.
         let p = pantalla(&mut a, 80, 24);
         let filas: Vec<&str> = p.lines().collect();
-        assert!(filas[0].contains("GESSHTOR") && filas[0].contains("r   e  Empleo  a  i  u"), "{p}");
+        assert!(filas[0].contains("GESSHTOR") && filas[0].contains("r   e  Empleo  a  p  u"), "{p}");
         assert!(filas[1].contains("1 Sueldo") && filas[1].contains("2 Nóminas"), "{p}");
         // Y en la ayuda.
         teclas(&mut a, "?");
         let p = pantalla(&mut a, 120, 36);
-        assert!(p.lines().any(|l| l.contains("r e a i u ") && l.contains("ir a una sección: Resumen, Empleo, Autónomo")), "{p}");
+        assert!(p.lines().any(|l| l.contains("r e a p u ") && l.contains("ir a una sección: Resumen, Empleo, Autónomo")), "{p}");
     }
 
     /// El nombre de arriba a la izquierda: sus dos filas miden lo mismo (una celda por carácter), caben antes de la
@@ -1171,19 +1171,19 @@ mod tests {
         let mut a = app();
         // Con sitio de sobra (Inicio tiene una sola tecla), todo entero.
         let p = pie(&mut a, 120, 36);
-        assert_eq!(p, format!("  r a i u sección   1 2 3 pestaña     Tab más{}S traer lo último     ? ayuda   q salir", " ".repeat(34)));
+        assert_eq!(p, format!("  r a p u sección   1 2 3 pestaña     Tab más{}S traer lo último     ? ayuda   q salir", " ".repeat(34)));
         // En Facturas, sin lo de navegar, con «S traer» y las teclas que caben, de la primera en adelante.
         ir(&mut a, "Facturas");
         let p = pie(&mut a, 120, 36);
         assert!(p.starts_with("  n nueva   Enter ver   c cobrada   D duplicar   o doc   f filtro   / buscar   "), "{p}");
-        assert!(p.ends_with("S traer     ? ayuda   q salir") && !p.contains("sección") && !p.contains("r a i u"), "{p}");
+        assert!(p.ends_with("S traer     ? ayuda   q salir") && !p.contains("sección") && !p.contains("r a p u"), "{p}");
         let p = pie(&mut a, 80, 24);
         assert!(p.starts_with("  n nueva   Enter ver   c cobrada") && p.ends_with("S traer     ? ayuda   q salir"), "{p}");
         // Si lo de navegar entero no cabe con las teclas de la pantalla (Nóminas), sin las palabras.
         let mut a = con_empleo();
         teclas(&mut a, "e2");
         let p = pie(&mut a, 120, 36);
-        assert!(p.starts_with("  r e a i u   1 2     n nueva") && p.ends_with("S traer lo último     ? ayuda   q salir"), "{p}");
+        assert!(p.starts_with("  r e a p u   1 2     n nueva") && p.ends_with("S traer lo último     ? ayuda   q salir"), "{p}");
         // Escribiendo (el editor de una factura), a 80 columnas: todas las teclas, con lo que dicen recortado.
         ir(&mut a, "Facturas");
         teclas(&mut a, "n<esc>");
@@ -1304,7 +1304,7 @@ mod tests {
         teclas(&mut a, "+");
         assert_eq!(a.ctx.anio, hoy);
         teclas(&mut a, "3<tab>");
-        assert_eq!(a.titulo_activa(), "Este año", "la sección siguiente: Inversiones");
+        assert_eq!(a.titulo_activa(), "Este año", "la sección siguiente: Patrimonio");
         teclas(&mut a, "<s-tab>");
         assert_eq!(a.titulo_activa(), "Impuestos");
         teclas(&mut a, "r2o");

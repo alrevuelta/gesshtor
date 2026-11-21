@@ -1,4 +1,5 @@
-//! Inversiones: tu ahorro (dividendos, intereses y lo que vendes). Tres pestañas, con las cifras de
+//! Patrimonio (la sección `p`): lo que tienes y lo que te da. Hoy, tu ahorro (dividendos, intereses y lo que
+//! vendes) y lo que tienes fuera (720); los alquileres vendrán aquí. Tres pestañas, con las cifras de
 //! `informe::inversiones`:
 //!
 //! 1. **Este año**: con lo traído de tu bróker (`b` lo trae; la primera vez, pide activar el conector), cuánto has
@@ -838,7 +839,7 @@ mod tests {
     fn este_anio_sin_broker() {
         let dir = caso("a-de-todo");
         let mut a = app_con(cargar(&dir), &dir);
-        teclas(&mut a, "i");
+        teclas(&mut a, "p");
         assert_eq!(a.titulo_activa(), "Este año");
         let p = pantalla(&mut a, 120, 36);
         assert!(p.contains("conectar con tu bróker (DEGIRO)") && p.contains("Está desactivado"), "{p}");
@@ -855,7 +856,7 @@ mod tests {
     fn conectar_sin_que_se_vea_la_contrasena() {
         let dir = caso("a-de-todo");
         let mut a = app_con(cargar(&dir), &dir);
-        teclas(&mut a, "ib<enter>");
+        teclas(&mut a, "pb<enter>");
         assert!(a.ctx.datos.inversiones.activado("degiro"), "activado");
         teclas(&mut a, "ana<tab>secreta9<tab>123456");
         assert_eq!(a.titulo_activa(), "Este año", "las cifras se escriben, no navegan");
@@ -887,7 +888,7 @@ mod tests {
         let d = con_cartera();
         let dir = caso("a-de-todo");
         let mut a = app_con(d, &dir);
-        teclas(&mut a, "i2");
+        teclas(&mut a, "p2");
         assert_eq!(a.titulo_activa(), "Declarado");
         assert!(!pantalla(&mut a, 120, 36).trim().is_empty());
         teclas(&mut a, "3-");

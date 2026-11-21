@@ -1,4 +1,4 @@
-//! Conectar con un bróker, desde Inversiones: activar su conector (diciendo antes qué hace y qué riesgos tiene),
+//! Conectar con un bróker, desde Patrimonio: activar su conector (diciendo antes qué hace y qué riesgos tiene),
 //! pedir lo de entrar (que no se guarda: solo vive en esta ventana mientras se intenta) y traerlo en otro hilo.
 //! Al acabar, lo traído va a `fuentes/<conector>.json` (un fallo no pisa lo de antes) y a los datos.
 use crate::brokers::{self, Conector};

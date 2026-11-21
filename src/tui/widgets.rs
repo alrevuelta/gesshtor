@@ -51,7 +51,7 @@ pub mod tema {
     pub const RESUMEN: Color = Color::Rgb(0xb6, 0x9c, 0xff);
     pub const EMPLEO: Color = Color::Rgb(0x5f, 0xd4, 0xc4);
     pub const AUTONOMO: Color = Color::Rgb(0xff, 0x9f, 0x5a);
-    pub const INVERSIONES: Color = Color::Rgb(0x9b, 0xd7, 0x7a);
+    pub const PATRIMONIO: Color = Color::Rgb(0x9b, 0xd7, 0x7a);
     pub const UTILIDADES: Color = Color::Rgb(0xa3, 0xb1, 0xc6);
 
     /// El color de una sección, por su letra del menú (otra letra: el de Resumen).
@@ -59,7 +59,7 @@ pub mod tema {
         match tecla {
             'e' => EMPLEO,
             'a' => AUTONOMO,
-            'i' => INVERSIONES,
+            'p' => PATRIMONIO,
             'u' => UTILIDADES,
             _ => RESUMEN,
         }

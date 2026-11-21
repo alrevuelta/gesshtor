@@ -6,14 +6,14 @@ use super::{anios, declaraciones, empleo, facturas, gastos, impuestos, inicio, i
 use ratatui::style::Color;
 
 /// Las letras de las secciones (las que hay y las que vendrán): ninguna pantalla las usa salvo escribiendo.
-pub const RESERVADAS: &str = "reaiu";
+pub const RESERVADAS: &str = "reapu";
 
 pub fn secciones() -> Vec<Seccion> {
     vec![
         Seccion::new('r', "Resumen", vec![Box::new(inicio::Inicio::default()), Box::new(anios::Anios::default()), Box::new(declaraciones::Declaraciones::default())]),
         Seccion::new('e', "Empleo", empleo::pantallas()).si(|s| s.empleo),
         Seccion::new('a', "Autónomo", vec![Box::new(facturas::Facturas::default()), Box::new(gastos::Gastos::default()), Box::new(impuestos::Impuestos::default())]).si(|s| s.autonomo),
-        Seccion::new('i', "Inversiones", inversiones::pantallas()),
+        Seccion::new('p', "Patrimonio", inversiones::pantallas()),
         Seccion::new('u', "Utilidades", vec![Box::new(utilidades::Calculadora::default())]),
     ]
 }

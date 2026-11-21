@@ -20,7 +20,7 @@ Run:
 
 # con quién habla
 
-Solo con Hacienda (`agenciatributaria.gob.es`) y la Seguridad Social (`seg-social.es`) y, solo si activas su conexión en Inversiones, con DEGIRO (`trader.degiro.nl`). Nada más sale de tu ordenador. Tu usuario y tu contraseña de DEGIRO se piden cada vez y no se guardan.
+Solo con Hacienda (`agenciatributaria.gob.es`) y la Seguridad Social (`seg-social.es`) y, solo si activas su conexión en Patrimonio, con DEGIRO (`trader.degiro.nl`). Nada más sale de tu ordenador. Tu usuario y tu contraseña de DEGIRO se piden cada vez y no se guardan.
 
 # disclaimer
 

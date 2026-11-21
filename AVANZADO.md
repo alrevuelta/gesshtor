@@ -29,7 +29,7 @@ privada se queda en memoria mientras la app está abierta.
   `S` lo vuelve a traer; `--todo` vuelve a consultar todos los años.
 - Solo habla con Hacienda (`agenciatributaria.gob.es`) y la Seguridad Social (`seg-social.es`): las redirecciones
   a cualquier otro sitio se cortan. Nada sale de tu ordenador hacia ningún otro lado, salvo dos cosas opcionales
-  y apagadas por defecto: si activas la conexión con DEGIRO en Inversiones, habla con `trader.degiro.nl`; y si
+  y apagadas por defecto: si activas la conexión con DEGIRO en Patrimonio, habla con `trader.degiro.nl`; y si
   enciendes que Claude clasifique los documentos que arrastras (ver abajo), esos documentos, y solo esos, van a
   Anthropic.
 - La pantalla **Inicio** te saluda y resume: tu certificado y cuándo caduca, si ahora trabajas por cuenta ajena,
@@ -72,7 +72,7 @@ A la izquierda, el nombre y las secciones (arriba si la terminal es estrecha); a
 (`1`, `2`, `3`) y, a su lado, el año que ves («‹ 2026 ›»), que se cambia con `-` y `+` (no sale donde no cuenta:
 Inicio, tus clientes, la calculadora y Declaraciones con todos los años); a la derecha, tu nombre, la fecha y si está
 al día. Abajo, las teclas de la pantalla. Los colores, uno por sección, están todos en `tui::widgets::tema`. Las
-secciones salen si te tocan: Empleo si tienes o tuviste nómina, Autónomo si lo eres o lo fuiste (Inversiones,
+secciones salen si te tocan: Empleo si tienes o tuviste nómina, Autónomo si lo eres o lo fuiste (Patrimonio,
 siempre).
 
 | Sección | Entradas |
@@ -80,8 +80,8 @@ siempre).
 | **Resumen** | Inicio (el saludo, cómo va el año y cuánto falta para el próximo plazo, y en tarjetas lo esencial) · Años (uno por fila, el último el que está en curso: lo que ganaste por partes, lo que pagaste, lo que te quedó y lo que salió en tu Renta; Enter abre uno entero: el resumen de su Renta (modelo 100; `o` abre el PDF), cada fuente paso a paso con de dónde sale cada cifra (de lo que pagó tu empresa por ti a lo que te llegó, con la Seguridad Social por conceptos; de lo facturado a lo que te quedó), el % que se llevó el Estado, tu IRPF y cómo lo pagaste, y la Renta casilla a casilla; el año en curso, hasta hoy y con lo que saldría en tu Renta) · Declaraciones (todo lo presentado en Hacienda, de cualquier modelo, con sus casillas y su PDF) |
 | **Empleo** | Sueldo (el año, si te retienen bien y mes a mes; Enter abre un mes con lo cotizado concepto a concepto) · Nóminas (donde se apuntan, una por mes, en cualquier año) |
 | **Autónomo** | Facturas (con `C`, tus clientes: se abren con el de la factura elegida, y ahí se cambian, se añaden y se borran; se guardan solos al emitir, o al crearlos en el editor de la factura) · Gastos (con tus recibos de autónomo de la Seguridad Social, que entran solos como «Cuota de autónomos» y cuentan en el 130 y la Renta; filtrando por esa categoría, arriba sale lo de tus cuotas: la cuota y la base, la base próxima, los meses sin recibo y la regularización; Enter abre un recibo con su desglose) · Impuestos (en «Año», cómo va la actividad: lo facturado y lo gastado, los avisos, los trimestres y los meses; con ← →, cada trimestre con su 303 y su 130 casilla a casilla) |
-| **Inversiones** | Este año (con lo traído de tu bróker, `b`: lo que has ganado o perdido con lo que has vendido, tus dividendos e intereses con lo retenido y lo que te tocaría pagar con la escala del ahorro, paso a paso; venta a venta y cobro a cobro) · Declarado (lo del ahorro de cada Renta: intereses, dividendos, ganancias y pérdidas, también de criptomonedas, la base del ahorro y lo que pagaste por ella) · Modelo 720 (lo que tenías fuera de España a 31 de diciembre por bloque y por país, si te toca presentar el 720 o el 721 y si consta presentado) |
-| **Utilidades** | Calculadora (de un sueldo bruto, lo que te queda al mes y al año, lo que te quitan —IRPF y Seguridad Social— y lo que le cuestas a tu empresa; de lo que factura un autónomo, lo que le queda, su IRPF y su cuota por tramos. Debajo, lo mismo en cada comunidad de territorio común, de más a menos: con ↑↓ se elige una y se ve cuánto más o menos te queda en las demás. `d`, el detalle concepto a concepto (MEI y solidaridad incluidos). Con las reglas de su año: las cotizaciones, en `tgss/reglas.rs`; el IRPF, en `hacienda/irpf.rs`) |
+| **Patrimonio** (lo que tienes y lo que te da; hoy, tu ahorro y lo que tienes fuera; los alquileres vendrán aquí) | Este año (con lo traído de tu bróker, `b`: lo que has ganado o perdido con lo que has vendido, tus dividendos e intereses con lo retenido y lo que te tocaría pagar con la escala del ahorro, paso a paso; venta a venta y cobro a cobro) · Declarado (lo del ahorro de cada Renta: intereses, dividendos, ganancias y pérdidas, también de criptomonedas, la base del ahorro y lo que pagaste por ella) · Modelo 720 (lo que tenías fuera de España a 31 de diciembre por bloque y por país, si te toca presentar el 720 o el 721 y si consta presentado) |
+| **Utilidades** | Calculadora (de un sueldo bruto, lo que te queda al mes y cuánto se va en impuestos y cotizaciones; en escalera, de lo que le cuestas a tu empresa a lo que te queda, cada paso con qué es y su %; de lo que factura un autónomo, lo mismo: sus gastos, su cuota por tramos y su IRPF. Debajo, lo que te queda al mes en cada comunidad de territorio común, de más a menos: con ↑↓ se elige una y se ve cuánto más o menos al mes te queda en las demás. `d`, el detalle concepto a concepto (MEI y solidaridad incluidos). Con las reglas de su año: las cotizaciones, en `tgss/reglas.rs`; el IRPF, en `hacienda/irpf.rs`) |
 
 En **Años**, los que no tienen Renta van en gris (también el que está en curso): sus cifras no son las de
 Hacienda, y al abrirlos se dice qué es aproximado y de dónde sale.
@@ -99,7 +99,7 @@ diciembre), sin hijos ni discapacidad, sin otras rentas y en la comunidad de tu 
 mínimos, reducción y deducción del trabajo) están en `hacienda/irpf.rs`, de 2022 a 2025; para otros años se
 usan las más cercanas y se dice.
 
-Se navega con letras y números: la letra de cada sección (`r` Resumen, `e` Empleo, `a` Autónomo, `i` Inversiones,
+Se navega con letras y números: la letra de cada sección (`r` Resumen, `e` Empleo, `a` Autónomo, `p` Patrimonio,
 `u` Utilidades) y, dentro, el número de cada pestaña (`1`, `2`, `3`…), que el menú lleva al lado. Así
 `a2` es Gastos y `r3`, Declaraciones. Esas letras y números están reservados: ninguna pantalla los usa, salvo
 escribiendo (en un campo, una búsqueda o un formulario), donde se escriben. `Tab` pasa a la pestaña siguiente, `o`
@@ -115,7 +115,7 @@ abre el PDF, `S` trae lo último de Hacienda y la Seguridad Social, `!` enseña 
 | `Enter` | ver o editar lo elegido |
 | `n` · `d` · `D` | nuevo · borrar · duplicar (facturas y gastos) |
 | `E` · `c` · `C` | en Facturas: emitir · cobrada · tus clientes |
-| `b` · `x` | en Inversiones › Este año: traer lo de tu bróker (la primera vez, activar su conexión) · desconectarlo |
+| `b` · `x` | en Patrimonio › Este año: traer lo de tu bróker (la primera vez, activar su conexión) · desconectarlo |
 | `t` | en Gastos, el trimestre; en Declaraciones, todos los años; en Impuestos, todas las casillas |
 | `/` · `o` · `S` · `?` · `q` | buscar · abrir el PDF · traer lo último · ayuda · salir |
 | soltar un fichero | clasificarlo con Claude (si está encendido: ver «Arrastrar documentos») |
@@ -186,7 +186,7 @@ añadir un modelo con casillas: un `modelo_XXX.rs` con su `impl Formulario`, su 
     aeat-2025-consulta.json      lo presentado en Hacienda en 2025 (lo que dice su consulta, modelo a modelo)
     aeat-2025-1T-303-CSV.json    lo leído del PDF de esa presentación (uno por PDF: una complementaria no pisa
     aeat-2024-0A-100-CSV.json    a la original; de varias del mismo periodo vale la última presentada)
-    degiro.json                  lo traído de DEGIRO, si lo has conectado (en el formato común: ver Inversiones)
+    degiro.json                  lo traído de DEGIRO, si lo has conectado (en el formato común: ver Patrimonio y brókeres)
   justificantes/    los PDF de Hacienda (2025_1T_303_CSV.pdf)
   documentos/       los tuyos (facturas de gastos, tiques…)
   copias/           las últimas 20 copias de datos.json (una por sesión con cambios, antes del primero)
@@ -224,7 +224,7 @@ añadir un modelo con casillas: un `modelo_XXX.rs` con su `impl Formulario`, su 
 - **Lo presentado** sale de la consulta a Hacienda, y sus casillas de los PDF leídos: no se marca nada a mano.
 - **Rápido**: cada pantalla calcula lo suyo una vez por (datos, año) y lo reutiliza al repintar.
 
-## Inversiones y brókeres
+## Patrimonio y brókeres
 
 Tres piezas que no se mezclan:
 
@@ -267,7 +267,7 @@ Bajos, arts. 9.1 y 17) y tu efectivo está en tu cuenta en flatexDEGIRO Bank, en
 
 Cómo se prueba con tu cuenta (las pruebas no salen a la red, y no hay cuenta de prueba):
 
-1. `gesshtor --certificado …`, `i` (Inversiones) y `b`: lee el aviso y actívalo.
+1. `gesshtor --certificado …`, `p` (Patrimonio) y `b`: lee el aviso y actívalo.
 2. Escribe tu usuario, tu contraseña y, si usas una app de verificación, su código de 6 cifras (si no, déjalo vacío
    y confirma en la app de DEGIRO cuando lo diga la pantalla; espera unos dos minutos). Un solo intento por `b`:
    DEGIRO castiga los reintentos seguidos (429, captcha o bloqueo).
@@ -367,7 +367,7 @@ CLASIFICAR=carpeta cargo test clasificar_de_verdad -- --ignored --nocapture     
   despacho, la serie de las facturas…; las reglas del IRPF de 2026 cuando salga el Manual.
 - Rectificativas de facturas.
 - Presentar declaraciones: fuera de la primera versión (solo se consulta).
-- Inversiones: más conectores (Interactive Brokers, un CSV); los splits, fusiones y cambios de ISIN (hoy se avisan, y
+- Patrimonio: los alquileres; más conectores (Interactive Brokers, un CSV); los splits, fusiones y cambios de ISIN (hoy se avisan, y
   lo que vendas de ese valor desde entonces no entra en las cuentas); los traspasos entre fondos (art. 94); el saldo
   medio del último trimestre de las cuentas para el 720; las acciones en otra divisa como dice la DGT (la diferencia
   en la divisa, al cambio del día de la venta).
