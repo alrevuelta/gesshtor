@@ -172,6 +172,7 @@ pub fn leer_todo(dir: &Path, progreso: &mut dyn FnMut(usize, usize)) -> Lecturas
         hechos.push((j, f));
     }
     let mut l = lecturas(&hechos);
+    l.censo = super::censo::de_la_carpeta(dir);
     for (n, e) in sin_guardar {
         let msg = format!("No se ha podido guardar lo leído en fuentes/{n}: se vuelve a leer cada vez que se abre la app.");
         l.fallos.insert(format!("fuentes/{n}"), Error::formato("FUENTE_NO_SE_GUARDA", crate::donde!("leer_todo"), msg).en(format!("fuentes/{n}")).encontrado(e));

@@ -1,7 +1,7 @@
-//! Impuestos: en la pestaña «Año», cómo va la actividad (lo facturado y lo gastado, los avisos, los trimestres y
-//! los meses: `impuestos_anio`); en cada trimestre, los modelos 303 (IVA) y 130 (IRPF) casilla a casilla: lo que
-//! hay que poner y, si se presentó, si cuadra con tus datos y por qué no; en «390», el resumen anual del IVA y si
-//! toca el 349 o el 347. Se pasa de una a otra con ← →. Solo se mira: no cambia nada.
+//! Modelos: lo que hay que presentar en los próximos 4 meses, con sus días, y lo ya presentado; con Enter, las casillas
+//! de cada uno (`impuestos_ahora`). Con `d`, un trimestre entero (los modelos 303 y 130 casilla a casilla y, si se
+//! presentó, si cuadra con tus datos y por qué no) o el 390 (el resumen anual del IVA y si toca el 349 o el 347). Solo
+//! se mira: no cambia nada.
 //!
 //! Sin cajas (estilo C2): arriba, las pestañas y el periodo; en un trimestre, el 303 y el 130 uno al lado del otro
 //! (o uno debajo del otro, si no caben), cada uno con su resultado en una banda, el sello de si cuadra y sus
@@ -29,9 +29,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::path::PathBuf;
 use trimestre::Estado;
-use super::{impuestos_anio, impuestos_casillas as casillas, impuestos_trimestre as trimestre};
+use super::{impuestos_ahora as ahora, impuestos_casillas as casillas, impuestos_trimestre as trimestre};
 use crate::dominio::Valor;
 
+/// El nombre de la pestaña (la app la pone en rojo si hay algo vencido).
+pub const TITULO: &str = "Modelos";
 /// Desde este ancho del contenido, el 303 y el 130 van uno al lado del otro (a 120 columnas, el contenido tiene 94).
 const ANCHO_DOBLE: u16 = 94;
 /// Columnas entre el 303 y el 130.
@@ -43,15 +45,18 @@ const MAS: usize = 8;
 
 #[derive(Default)]
 pub struct Impuestos {
-    /// Trimestre que se ve (1–4), si no se ve el año.
+    /// Se ve la lista: lo que hay que presentar y lo presentado, con las casillas de cada modelo.
+    en_ahora: bool,
+    ahora: ahora::Ahora,
+    /// El año que había al abrir un trimestre de otro año (en enero, el 4T del anterior): Esc lo devuelve.
+    volver_a: Option<i32>,
+    /// Trimestre que se ve (1–4), si se ha abierto uno entero.
     q: u32,
     /// Año para el que se eligió la pestaña (0 = aún sin elegir).
     anio: i32,
     /// También las casillas a cero.
     todas: bool,
-    /// La pestaña «Año» en vez de un trimestre.
-    anual: bool,
-    /// La pestaña «390» (el resumen anual del IVA y las demás declaraciones del año).
+    /// El 390 abierto (el resumen anual del IVA y las demás declaraciones del año).
     v390: bool,
     scroll: u16,
     /// Los PDF del trimestre que se ve (para la barra de atajos).
@@ -61,8 +66,6 @@ pub struct Impuestos {
     cab: Option<Cabecera>,
     trim: Option<DelTrimestre>,
     del390: Option<Del390>,
-    /// La pestaña «Año».
-    resumen: impuestos_anio::Anio,
     /// Cuántas veces se ha calculado algo (para las pruebas).
     #[cfg(test)]
     pub(crate) calculos: usize,
@@ -83,6 +86,9 @@ struct Cabecera {
     cuantos: [(usize, usize); 4],
     /// Algún modelo presentado del trimestre no cuadra con tus datos.
     no_cuadra: [bool; 4],
+    /// De cada trimestre, el resultado del 303 y el del 130 (lo presentado si se sabe; si no, con tus datos) y si el
+    /// 303 negativo se pide devolver.
+    resultados: [(Option<f64>, Option<f64>, bool); 4],
 }
 
 impl Cabecera {
@@ -98,7 +104,12 @@ impl Cabecera {
         });
         let mut memo = Memo::default();
         let no_cuadra = std::array::from_fn(|i| Trimestral::TODOS.iter().any(|&m| autonomo::cuadre(d, m, y, i as u32 + 1, &mut memo).is_some_and(|c| !c.cuadra())));
-        Cabecera { clave, estados, cuantos, no_cuadra }
+        let resultados = std::array::from_fn(|i| {
+            let q = i as u32 + 1;
+            let r = |m: Trimestral, memo: &mut Memo| Some(m.resultado_de(&m.cuenta(d, y, q, memo)));
+            (r(Trimestral::M303, &mut memo), r(Trimestral::M130, &mut memo), trimestre::devolver303(d, y, q))
+        });
+        Cabecera { clave, estados, cuantos, no_cuadra, resultados }
     }
 }
 
@@ -269,7 +280,7 @@ impl Modelo {
 /* ================= piezas de texto ================= */
 
 /// Rellena con espacios o corta con «…» hasta `n` caracteres.
-fn ajustar(s: &str, n: usize) -> String {
+pub(super) fn ajustar(s: &str, n: usize) -> String {
     let c = s.chars().count();
     if c <= n {
         format!("{s}{}", " ".repeat(n - c))
@@ -306,7 +317,7 @@ fn largo(s: &str) -> usize {
 }
 
 /// La línea en `ancho` columnas justas: se corta (con «…») o se rellena con espacios.
-fn a_medida(l: Line<'static>, ancho: usize) -> Line<'static> {
+pub(super) fn a_medida(l: Line<'static>, ancho: usize) -> Line<'static> {
     let estilo = l.style;
     let mut v: Vec<Span<'static>> = Vec::new();
     let mut usado = 0;
@@ -400,7 +411,15 @@ fn que_sale(m: &Modelo, v: f64) -> (&'static str, String, Style, &'static str, C
     let neutro = tema::suave(tema::MARCO);
     match m.modelo {
         _ if v > DIF => ("a ingresar", fmt::eur(v), Style::new().fg(tema::acento()), "", tema::SUAVE_NARANJA),
-        Trimestral::M303 if v < -DIF => (if m.devolver { "a devolver" } else { "a compensar" }, fmt::eur(-v), Style::new().fg(tema::BIEN), "", tema::SUAVE_BIEN),
+        // Solo en el 4T se puede pedir la devolución, y es a elegir: hasta presentarlo, es saldo a tu favor.
+        Trimestral::M303 if v < -DIF => {
+            let que = match (m.devolver, matches!(m.estado, Estado::Presentado(_))) {
+                (false, _) => "a compensar",
+                (true, true) => "a devolver",
+                (true, false) => "a tu favor",
+            };
+            (que, fmt::eur(-v), Style::new().fg(tema::BIEN), "", tema::SUAVE_BIEN)
+        }
         Trimestral::M130 if v < -DIF => ("a ingresar", fmt::eur(0.0), tema::apagado(), "(negativa)", neutro),
         _ => ("resultado", fmt::eur(0.0), tema::apagado(), "", neutro),
     }
@@ -828,7 +847,7 @@ fn documento(t: &DelTrimestre, d: &Datos, ancho: usize, todas: bool) -> Vec<Line
 }
 
 /// Cómo va cada trimestre del año, en una fila (o en más, si no cabe): «1T ✓     2T ≠     3T 303 vencido     4T
-/// ahora saldrían 493,50 € + 50,00 €». Con `res`, los resultados de cada trimestre (de la pestaña «Año»).
+/// ahora saldrían 493,50 € + 50,00 €». Con `res`, los resultados de cada trimestre.
 fn fila_anio(cab: &Cabecera, res: &[(Option<f64>, Option<f64>, bool)], y: i32, ancho: usize) -> Vec<Line<'static>> {
     let gris = tema::apagado();
     let negrita = Style::new().add_modifier(Modifier::BOLD);
@@ -852,7 +871,8 @@ fn fila_anio(cab: &Cabecera, res: &[(Option<f64>, Option<f64>, bool)], y: i32, a
             let (r303, r130, devolver) = res.get(i).copied().unwrap_or((None, None, false));
             let mut partes = Vec::new();
             if let (false, Some(r)) = (e303.hecho(), r303) {
-                partes.push(("303", r, trimestre::texto303(r, devolver, false)));
+                let t = if r < -DIF && devolver { format!("{} a tu favor", fmt::eur(-r)) } else { trimestre::texto303(r, devolver, false) };
+                partes.push(("303", r, t));
             }
             if let (false, Some(r)) = (e130.hecho(), r130) {
                 partes.push(("130", r, trimestre::texto130(r, false)));
@@ -928,26 +948,49 @@ pub(super) fn por_que(v: &mut Vec<Line<'static>>, conc: &Conciliacion, grupos: &
 }
 
 impl Impuestos {
-    /// ¿Se ve un trimestre? (ni el año ni el 390)
+    /// ¿Se ve un trimestre entero? (ni la lista ni el 390)
     fn trimestral(&self) -> bool {
-        !self.anual && !self.v390
+        !self.en_ahora && !self.v390
     }
 
-    /// Al entrar por primera vez o con otro año, se ve el año entero.
+    /// Al entrar por primera vez o con otro año, se ve la lista.
     fn elegir_pestana(&mut self, ctx: &Ctx) {
         if self.anio != ctx.anio {
-            self.anual = true;
+            self.en_ahora = true;
             self.v390 = false;
             self.q = 4;
             self.anio = ctx.anio;
             self.scroll = 0;
+            self.volver_a = None;
+            self.ahora.al_principio();
         }
+    }
+
+    /// Abre entero el trimestre o el 390 de una fila de la lista (que puede ser del año anterior, en enero).
+    fn ver_todo(&mut self, c: ahora::Cual, ctx: &mut Ctx) {
+        let (a, q, es390) = match c {
+            ahora::Cual::Trimestre(_, a, q) => (a, q, false),
+            ahora::Cual::Resumen390(a) => (a, 4, true),
+            ahora::Cual::Otro => return,
+        };
+        if a != ctx.anio {
+            self.volver_a = Some(ctx.anio);
+        }
+        ctx.anio = a;
+        self.anio = a;
+        (self.en_ahora, self.v390, self.q, self.scroll) = (false, es390, q, 0);
     }
 
     /// Rehace lo calculado que haya cambiado (datos, año, trimestre o día).
     fn preparar(&mut self, ctx: &Ctx) {
         self.elegir_pestana(ctx);
         let hoy = fmt::hoy();
+        if self.en_ahora {
+            if self.ahora.preparar(ctx, &hoy) {
+                self.contar();
+            }
+            return;
+        }
         let k = clave(ctx, 0);
         if self.cab.as_ref().is_none_or(|c| c.clave != k) {
             self.cab = Some(Cabecera::nueva(ctx, &hoy, k.clone()));
@@ -986,16 +1029,6 @@ impl Impuestos {
         let y = ctx.anio;
         let gris = tema::apagado();
         let anio = Span::styled(y.to_string(), Style::new().add_modifier(Modifier::BOLD));
-        if self.anual {
-            let que = if y == fmt::anio_actual() {
-                "hasta hoy"
-            } else if autonomo::cerrado(&ctx.datos, y) {
-                "cerrado: se ve con lo que presentaste"
-            } else {
-                return vec![vec![anio]];
-            };
-            return vec![vec![anio], vec![Span::styled(que, gris)]];
-        }
         if self.v390 {
             let p = trimestre::plazo(y, 4);
             let estado = match self.del390.as_ref().and_then(|t| t.presentado.as_ref()) {
@@ -1011,7 +1044,7 @@ impl Impuestos {
         let mut v = vec![
             vec![anio, Span::styled(format!(" · {} – {}", trimestre::dia_mes(&ini), trimestre::dia_mes(&fin)), gris)],
             vec![Span::styled(format!("plazo {}", trimestre::del_al(&p.ini, &p.fin, y)), gris)],
-            vec![Span::styled(format!("domiciliar hasta el {}", dia(&p.domiciliar)), gris)],
+            vec![Span::styled(p.domiciliar.as_deref().map_or("domiciliar: aún sin fecha oficial".to_string(), |x| format!("domiciliar hasta el {}", dia(x))), gris)],
         ];
         if let Some(cab) = &self.cab {
             let (nf, ng) = cab.cuantos[self.q as usize - 1];
@@ -1020,13 +1053,13 @@ impl Impuestos {
         v
     }
 
-    /// Arriba, las pestañas («1T 2T 3T 4T año 390», la elegida en FONDO sobre el color de la sección) y, tras
-    /// ellas, `piezas` separadas por « · »; lo que no cabe, en la fila de debajo. Devuelve las filas que ocupa.
+    /// Arriba, con un trimestre abierto, sus pestañas («1T 2T 3T 4T», la elegida en FONDO sobre el color de la sección)
+    /// y, tras ellas, `piezas` separadas por « · »; lo que no cabe, en la fila de debajo. Devuelve las filas que ocupa.
     fn cabecera(&self, f: &mut Frame, area: Rect, piezas: Vec<Vec<Span<'static>>>) -> u16 {
         let gris = tema::apagado();
         let mut fila: Vec<Span<'static>> = Vec::new();
-        let pestanas = (1..=4u32).map(|q| (format!("{q}T"), q == self.q && self.trimestral())).chain([("año".to_string(), self.anual), ("390".to_string(), self.v390)]);
-        for (i, (t, activa)) in pestanas.enumerate() {
+        let pestanas: Vec<(String, bool)> = if self.trimestral() { (1..=4u32).map(|q| (format!("{q}T"), q == self.q)).collect() } else { Vec::new() };
+        for (i, (t, activa)) in pestanas.into_iter().enumerate() {
             // Todas con su hueco a cada lado (la primera, sin el de la izquierda: empieza en la columna del
             // contenido): al cambiar de pestaña no se mueve nada.
             let t = if i == 0 { format!("{t} ") } else { format!("  {t} ") };
@@ -1036,7 +1069,9 @@ impl Impuestos {
                 None => fila.push(Span::styled(t, st)),
             }
         }
-        fila.push(Span::raw("   "));
+        if !fila.is_empty() {
+            fila.push(Span::raw("   "));
+        }
         // Lo que pasa a la fila de debajo va bajo lo de arriba; si así no cabe en dos filas, desde el principio.
         let ancho = area.width as usize;
         let x0 = fila.iter().map(Span::width).sum::<usize>();
@@ -1085,7 +1120,7 @@ impl Impuestos {
 
 impl Pantalla for Impuestos {
     fn titulo(&self) -> &'static str {
-        "Impuestos"
+        TITULO
     }
 
     fn al_entrar(&mut self, ctx: &mut Ctx) {
@@ -1094,23 +1129,23 @@ impl Pantalla for Impuestos {
         self.cab = None;
         self.trim = None;
         self.del390 = None;
-        self.resumen.olvidar();
+        self.ahora.olvidar();
     }
 
     fn dibujar(&mut self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         self.preparar(ctx);
+        if self.en_ahora {
+            self.ahora.dibujar(f, area, &fmt::hoy());
+            return;
+        }
+        // Sin estirarse en un terminal muy ancho: lo justo para el 303 y el 130 uno al lado del otro.
+        let area = Rect { width: area.width.min(ANCHO_DOBLE), ..area };
         let y = ctx.anio;
         let piezas = self.contexto(ctx);
         let alto = self.cabecera(f, area, piezas);
         // Debajo de las pestañas, una fila de aire.
         let quita = (alto + 1).min(area.height);
         let cuerpo = Rect { y: area.y + quita, height: area.height - quita, ..area };
-        if self.anual {
-            self.pdf303 = false;
-            self.pdf130 = false;
-            self.resumen.dibujar(f, cuerpo, ctx);
-            return;
-        }
         if self.v390 {
             let Some(t) = self.del390.take() else { return };
             self.pdf303 = t.pdf.is_some();
@@ -1120,13 +1155,11 @@ impl Pantalla for Impuestos {
             self.scroll = self.scroll.min(max);
             return;
         }
-        // Los resultados de cada trimestre, para la fila del año (los de la pestaña «Año»).
-        let res = self.resumen.resultados(ctx);
         let Some(t) = self.trim.take() else { return };
         self.pdf303 = t.m303.pdf.is_some();
         self.pdf130 = t.m130.pdf.is_some();
         let ancho = cuerpo.width as usize;
-        let anio = self.cab.as_ref().map(|c| fila_anio(c, &res, y, ancho)).unwrap_or_default();
+        let anio = self.cab.as_ref().map(|c| fila_anio(c, &c.resultados, y, ancho)).unwrap_or_default();
         let max = self.pintar_doc(f, cuerpo, documento(&t, &ctx.datos, ancho, self.todas), anio);
         self.trim = Some(t);
         self.scroll = self.scroll.min(max);
@@ -1134,30 +1167,34 @@ impl Pantalla for Impuestos {
 
     fn tecla(&mut self, k: KeyEvent, ctx: &mut Ctx) -> bool {
         self.elegir_pestana(ctx);
+        if self.en_ahora {
+            self.ahora.preparar(ctx, &fmt::hoy());
+            return match self.ahora.tecla(k, ctx) {
+                ahora::Accion::Usada => true,
+                ahora::Accion::VerTodo(c) => {
+                    self.ver_todo(c, ctx);
+                    true
+                }
+                ahora::Accion::Nada => false,
+            };
+        }
         match k.code {
-            // Las pestañas, en orden: 1T 2T 3T 4T Año 390.
-            KeyCode::Left | KeyCode::Char('h') => {
-                if self.v390 {
-                    (self.v390, self.anual) = (false, true);
-                } else if self.anual {
-                    self.anual = false;
-                } else {
-                    self.q = self.q.saturating_sub(1).max(1);
+            KeyCode::Esc => {
+                if let Some(y) = self.volver_a.take() {
+                    ctx.anio = y;
+                    self.anio = y;
                 }
+                (self.en_ahora, self.v390, self.scroll) = (true, false, 0);
+            }
+            // Con un trimestre abierto, de un trimestre a otro.
+            KeyCode::Left | KeyCode::Char('h') if self.trimestral() => {
+                self.q = self.q.saturating_sub(1).max(1);
                 self.scroll = 0;
             }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if self.anual {
-                    (self.anual, self.v390) = (false, true);
-                } else if self.v390 {
-                } else if self.q >= 4 {
-                    self.anual = true;
-                } else {
-                    self.q += 1;
-                }
+            KeyCode::Right | KeyCode::Char('l') if self.trimestral() => {
+                self.q = (self.q + 1).min(4);
                 self.scroll = 0;
             }
-            _ if self.anual && !matches!(k.code, KeyCode::Char('o' | 'O')) => return false,
             KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_add(1),
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
@@ -1176,10 +1213,6 @@ impl Pantalla for Impuestos {
                     }
                     return true;
                 }
-                if self.anual {
-                    ctx.elegir_pdf(ctx.anio);
-                    return true;
-                }
                 match trimestre::pdf(&ctx.dir, &ctx.datos, ctx.anio, self.q, modelo.modelo()) {
                     Some(p) => ctx.abrir_ruta(&p),
                     // Sin PDF de ese trimestre (aún no presentado): los del año, para elegir.
@@ -1192,24 +1225,14 @@ impl Pantalla for Impuestos {
     }
 
     fn atajos(&self) -> Vec<(&'static str, &'static str)> {
-        if self.anual {
-            return vec![("← →", "trimestres y 390")];
+        if self.en_ahora {
+            return self.ahora.atajos();
         }
+        let todas = ("t", if self.todas { "solo con valor" } else { "todas" });
         if self.v390 {
-            let mut v = vec![("←", "año"), ("↑↓", "bajar"), ("t", if self.todas { "solo con valor" } else { "todas" })];
-            if self.pdf303 {
-                v.push(("o", "PDF 390"));
-            }
-            return v;
+            return vec![("Esc", "volver"), ("↑↓", "bajar"), todas, ("o", "PDF 390")];
         }
-        let mut v = vec![("← →", "trimestre"), ("↑↓", "bajar"), ("t", if self.todas { "solo con valor" } else { "todas" })];
-        if self.pdf303 {
-            v.push(("o", "PDF 303"));
-        }
-        if self.pdf130 {
-            v.push(("O", "PDF 130"));
-        }
-        v
+        vec![("Esc", "volver"), ("← →", "trimestre"), ("↑↓", "bajar"), todas, ("o O", "PDF 303 y 130")]
     }
 }
 
@@ -1270,8 +1293,8 @@ mod tests {
     #[test]
     fn a_120_columnas_el_303_y_el_130_lado_a_lado() {
         let mut a = super::super::prueba::app();
-        super::super::prueba::ir(&mut a, "Impuestos");
-        super::super::prueba::teclas(&mut a, "<left>");
+        super::super::prueba::ir(&mut a, "Modelos");
+        super::super::prueba::teclas(&mut a, "d");
         let juntos = |p: String| p.lines().any(|l| l.contains("IVA · modelo 303") && l.contains("IRPF · modelo 130"));
         assert!(juntos(super::super::prueba::pantalla(&mut a, 120, 36)));
         assert!(!juntos(super::super::prueba::pantalla(&mut a, 100, 30)));
@@ -1299,6 +1322,28 @@ mod tests {
                 assert!(texto.contains(dice), "{hoy} a {ancho}: {texto}");
             }
         }
+    }
+
+    /// De la lista a un trimestre y de vuelta, con el año que había; y lo mismo con el 390.
+    #[test]
+    fn se_va_y_se_vuelve_de_cada_vista() {
+        use super::super::prueba::{app, ir, pantalla, teclas};
+        let hoy = fmt::anio_actual();
+        let mut a = app();
+        ir(&mut a, "Modelos");
+        let ve = |a: &mut crate::tui::App, que: &str| pantalla(a, 120, 36).contains(que);
+        assert!(ve(&mut a, "por presentar") && !ve(&mut a, "año   390"));
+        teclas(&mut a, "d");
+        assert!(ve(&mut a, "1T   2T   3T   4T") && !ve(&mut a, "por presentar"));
+        teclas(&mut a, "<esc>");
+        assert!(ve(&mut a, "por presentar"));
+        assert_eq!(a.ctx.anio, hoy, "Esc devuelve el año que había");
+        let mut m = Impuestos::default();
+        m.elegir_pestana(&a.ctx);
+        m.ver_todo(ahora::Cual::Resumen390(hoy), &mut a.ctx);
+        assert!(m.v390 && !m.en_ahora);
+        m.tecla(KeyEvent::from(KeyCode::Esc), &mut a.ctx);
+        assert!(m.en_ahora && !m.v390);
     }
 
     #[test]

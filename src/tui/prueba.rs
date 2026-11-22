@@ -160,7 +160,7 @@ pub fn recorrer(dir: &Path) -> BTreeMap<String, String> {
             let mut extra: Vec<(&str, &str)> = pasos.to_vec();
             match *t {
                 "Años" => extra.extend([("g", "g"), ("g otra vez", "g"), ("g y otra", "g"), ("+ desde el detalle", "<enter>+"), ("- desde el detalle", "-"), ("Esc y el anterior", "<esc>-<enter>"), ("Esc tras el anterior", "<esc>")]),
-                "Impuestos" => extra.extend([("← el 4T", "<left>"), ("← el 3T", "<left>"), ("→ → al año", "<right><right>")]),
+                "Modelos" => extra.extend([("Enter, se despliega", "<home><enter>"), ("↓ y Enter, otro", "<down><enter>"), ("Esc lo pliega", "<esc>"), ("d el trimestre", "<home>d"), ("← otro trimestre", "<left>"), ("Esc a la lista otra vez", "<esc>")]),
                 "Facturas" => extra.extend([("C sus clientes", "C"), ("abajo en los clientes", "<down>"), ("Esc a las facturas", "<esc>")]),
                 "Calcula tu sueldo" | "Calcula como autónomo" => extra.extend([("d el detalle", "d"), ("d las comunidades", "d"), ("→ otra comunidad", "<end><right>"), ("Enter y un importe", "<home><enter><c-u>45000"), ("Enter, calculado", "<enter>")]),
                 _ => {}
@@ -225,7 +225,7 @@ mod tests {
         ir(&mut a, "Facturas");
         let p = pantalla(&mut a, 120, 36);
         let filas: Vec<&str> = p.lines().collect();
-        assert!(filas[1].contains("1 Facturas     2 Gastos     3 Impuestos     ") && filas[1].contains(&anio), "{p}");
+        assert!(filas[1].contains("1 Facturas     2 Gastos     3 Modelos     ") && filas[1].contains(&anio), "{p}");
         assert!(filas[1].ends_with("Hola, Autónoma de Prueba"), "{p}");
         assert_eq!(filas[2].chars().position(|c| c == '▀'), Some(super::super::CONTENIDO as usize), "la raya, bajo la activa: {p}");
         assert!(filas[2].contains(&"▀".repeat("1 Facturas".len())), "{p}");

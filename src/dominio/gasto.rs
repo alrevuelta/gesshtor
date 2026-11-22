@@ -77,8 +77,8 @@ pub fn con_recibos(d: &mut Datos) {
     d.gastos.extend(recibos);
 }
 
-/// Los gastos apuntados (sin los recibos de la Seguridad Social): para saber si hay actividad. Pagar la cuota de
-/// autónomo no dice si toca presentar el 303 o el 130, ni que un año tenga datos en la app.
+/// Los gastos apuntados (sin los recibos de la Seguridad Social): para saber si un año tiene datos propios en la app.
+/// Para avisar de un modelo vencido, los recibos sí cuentan (`tui::impuestos_trimestre::hay_actividad`).
 pub fn apuntados(d: &Datos) -> impl Iterator<Item = &Gasto> {
     d.gastos.iter().filter(|g| !g.es_recibo())
 }

@@ -594,7 +594,7 @@ impl Gastos {
                 self.busca = Entrada::default();
                 self.sel = 0;
             }
-            // El trimestre, con ← →, como en Impuestos: 1T 2T 3T 4T año (sin dar la vuelta).
+            // El trimestre, con ← →, como en Modelos: 1T 2T 3T 4T año (sin dar la vuelta).
             KeyCode::Left | KeyCode::Right if !ficha => {
                 self.q = otro_trimestre(self.q, k.code == KeyCode::Left);
                 self.sel = 0;
@@ -694,7 +694,7 @@ impl Gastos {
     fn dibujar_filtros(&self, f: &mut Frame, area: Rect, _ctx: &Ctx, n: usize) {
         let gris = tema::apagado();
         let negrita = Style::new().add_modifier(Modifier::BOLD);
-        // En el orden de Impuestos: 1T 2T 3T 4T año (← → se mueve por ellos).
+        // En el orden de Modelos: 1T 2T 3T 4T año (← → se mueve por ellos).
         let trimestres = chips_trimestre(self.q);
         // La categoría, solo si hay una elegida (como el trimestre); luego, cuántos se ven.
         let linea = |hueco: &'static str| {
@@ -734,7 +734,7 @@ impl Gastos {
             } else {
                 format!("Todavía no hay gastos en {}.", ctx.anio)
             };
-            let pie = if self.cerrado { "Es un año cerrado: se ve en Impuestos, con tu Renta." } else { "Pulsa n para añadir uno." };
+            let pie = if self.cerrado { "Es un año cerrado: se ve en Resumen › Años, con tu Renta." } else { "Pulsa n para añadir uno." };
             f.render_widget(Paragraph::new(Line::styled(format!("{txt} {pie}"), tema::apagado())).wrap(Wrap { trim: false }), area);
             return;
         }

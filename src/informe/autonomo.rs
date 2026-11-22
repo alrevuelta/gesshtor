@@ -733,6 +733,36 @@ pub fn cuadre_390(d: &Datos, anio: i32, calc: &modelo_390::Calculado, memo: &mut
 
 /* ================= otras declaraciones del año: 349 y 347 ================= */
 
+/// Los trimestres de un año con alguna operación con empresas de la UE (ventas o compras): los del 349.
+pub fn trimestres_349(d: &Datos, anio: i32) -> BTreeSet<u32> {
+    let (desde, hasta) = (format!("{anio}-01-01"), format!("{anio}-12-31"));
+    let ventas = factura::emitidas(d).filter(|f| f.operacion == "ue").map(|f| f.devengo().to_string());
+    let compras = gasto::apuntados(d).filter(|g| g.origen == "ue").map(|g| g.fecha.clone());
+    ventas.chain(compras).filter(|f| fmt::en_rango(f, &desde, &hasta)).map(|f| fmt::trimestre_de(&f)).collect()
+}
+
+/// Con cuántos clientes y proveedores de España se pasa de 3.005,06 € en el año, con IVA (sin lo que lleva retención):
+/// los del 347.
+pub fn terceros_347(d: &Datos, anio: i32) -> (usize, usize) {
+    let (desde, hasta) = (format!("{anio}-01-01"), format!("{anio}-12-31"));
+    let del_anio = |fecha: &str| fmt::en_rango(fecha, &desde, &hasta);
+    let mut clientes: BTreeMap<String, f64> = BTreeMap::new();
+    for f in factura::emitidas(d).filter(|f| f.operacion == "nacional" && del_anio(f.devengo())) {
+        let t = factura::totales_factura(f);
+        if t.retencion <= DIF {
+            let quien = if f.cliente.nif.is_empty() { &f.cliente.nombre } else { &f.cliente.nif };
+            *clientes.entry(quien.to_uppercase()).or_default() += t.importe_total;
+        }
+    }
+    let mut proveedores: BTreeMap<String, f64> = BTreeMap::new();
+    for g in gasto::apuntados(d).filter(|g| g.origen == "es" && del_anio(&g.fecha)) {
+        let quien = if g.nif.is_empty() { &g.proveedor } else { &g.nif };
+        *proveedores.entry(quien.to_uppercase()).or_default() += gasto_calc(g, d).pagado;
+    }
+    let pasan = |m: &BTreeMap<String, f64>| m.iter().filter(|(k, x)| !k.is_empty() && **x > 3005.06).count();
+    (pasan(&clientes), pasan(&proveedores))
+}
+
 /// Si con tus facturas y gastos del año toca el 349 o el 347, en una frase cada uno.
 /// - 349 (declaración recapitulativa de operaciones intracomunitarias, art. 78-81 RIVA): si vendes a empresas de
 ///   la UE o les compras. Trimestral, o mensual si en un trimestre pasas de 50.000 €.
@@ -767,22 +797,7 @@ pub fn informativas(d: &Datos, anio: i32) -> Vec<String> {
             partes.join(" y ")
         ));
     }
-    // Por cliente y por proveedor de España, lo del año con IVA (sin las facturas con retención).
-    let mut clientes: BTreeMap<String, f64> = BTreeMap::new();
-    for f in factura::emitidas(d).filter(|f| f.operacion == "nacional" && del_anio(f.devengo())) {
-        let t = factura::totales_factura(f);
-        if t.retencion <= DIF {
-            let quien = if f.cliente.nif.is_empty() { &f.cliente.nombre } else { &f.cliente.nif };
-            *clientes.entry(quien.to_uppercase()).or_default() += t.importe_total;
-        }
-    }
-    let mut proveedores: BTreeMap<String, f64> = BTreeMap::new();
-    for g in gasto::apuntados(d).filter(|g| g.origen == "es" && del_anio(&g.fecha)) {
-        let quien = if g.nif.is_empty() { &g.proveedor } else { &g.nif };
-        *proveedores.entry(quien.to_uppercase()).or_default() += gasto_calc(g, d).pagado;
-    }
-    let pasan = |m: &BTreeMap<String, f64>| m.iter().filter(|(k, x)| !k.is_empty() && **x > 3005.06).count();
-    let (nc, np) = (pasan(&clientes), pasan(&proveedores));
+    let (nc, np) = terceros_347(d, anio);
     v.push(if nc + np == 0 {
         "Modelo 347 (operaciones con terceros): no te toca; con nadie de España pasas de 3.005,06 € en el año (IVA incluido, sin contar lo que lleva retención).".into()
     } else {

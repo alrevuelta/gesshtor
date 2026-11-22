@@ -166,6 +166,33 @@ pub struct Lecturas {
     pub formularios: BTreeMap<String, FormularioLeido>,
     /// Lo que no se ha podido leer la última vez (aunque se quede lo que se leyó bien antes): clave → por qué.
     pub fallos: BTreeMap<String, fallo::Error>,
+    /// Las altas y bajas en el censo de Hacienda, por fecha (de tus 036).
+    pub censo: Vec<CambioCenso>,
+}
+
+/// Un alta o una baja en el censo de Hacienda, con su fecha efectiva.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CambioCenso {
+    pub fecha: String,
+    pub alta: bool,
+}
+
+impl Lecturas {
+    /// ¿Estabas de alta en Hacienda en algún momento entre esas fechas? Sin ningún 036, no se sabe y cuenta como que sí.
+    pub fn en_censo(&self, ini: &str, fin: &str) -> bool {
+        let Some(primero) = self.censo.first() else { return true };
+        // Antes del primer cambio estabas al revés de lo que dice: si es un alta, de baja.
+        let mut dentro = !primero.alta;
+        for x in &self.censo {
+            if x.fecha.as_str() <= ini {
+                dentro = x.alta;
+            } else if x.alta && x.fecha.as_str() <= fin {
+                return true;
+            }
+        }
+        dentro
+    }
 }
 
 /// Una declaración leída de su PDF: las casillas que se ven, con su número.

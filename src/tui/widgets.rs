@@ -243,7 +243,7 @@ pub fn banda(f: &mut Frame, area: Rect, fondo: Color, linea: Line) {
     f.render_widget(Paragraph::new(linea), medio);
 }
 
-/// Los trimestres en el orden en que se ven y se recorren con ← → (en Facturas, Gastos e Impuestos; 0, todo el año).
+/// Los trimestres en el orden en que se ven y se recorren con ← → (en Facturas y Gastos; 0, todo el año).
 pub const ORDEN_Q: [u32; 5] = [1, 2, 3, 4, 0];
 
 /// El trimestre de al lado de `q` en `ORDEN_Q` (con `antes`, el de su izquierda), sin dar la vuelta.

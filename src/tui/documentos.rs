@@ -962,28 +962,29 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Espacio salta en el juego y no llega a la pantalla de debajo (en un trimestre de Impuestos baja la página).
+    /// Espacio salta en el juego y no llega a la pantalla de debajo (en un trimestre de Modelos baja la página).
     #[test]
     fn espacio_salta_y_no_llega_a_la_pantalla() {
         let mut b = app();
-        ir(&mut b, "Impuestos");
-        teclas(&mut b, "<left>");
+        ir(&mut b, "Modelos");
+        teclas(&mut b, "d");
         let antes = pantalla(&mut b, 120, 36);
         teclas(&mut b, "<space>");
         assert_ne!(antes, pantalla(&mut b, 120, 36), "sin la ventana, Espacio hace algo en un trimestre");
         let mut a = app();
-        ir(&mut a, "Impuestos");
-        teclas(&mut a, "<left>");
+        ir(&mut a, "Modelos");
+        teclas(&mut a, "d");
         let antes = pantalla(&mut a, 120, 36);
         let (dir, v) = ficheros(&[("tique.pdf", b"%PDF tique")]);
         pegar(&mut a, &v);
         teclas(&mut a, "<space>");
         assert!(a.documentos.juego.en_el_aire());
-        // Oculta (con Esc), la pantalla de debajo está como estaba (salvo la fila de los avisos y el carril, donde la
-        // mesa del gestor dice que los ha recibido).
+        // Oculta (con Esc), la pantalla de debajo está como estaba (salvo la fila del aviso y el carril, donde la mesa
+        // del gestor dice que los ha recibido).
         teclas(&mut a, "<esc>");
         let ahora = pantalla(&mut a, 120, 36);
-        let sin_avisos = |p: &str| crate::tui::prueba::sin_menu(p).lines().enumerate().filter(|(i, _)| *i != 33).map(|(_, l)| l.to_string()).collect::<Vec<_>>();
+        let fila_aviso = crate::tui::prueba::sin_menu(&ahora).lines().position(|l| l.contains("leyendo"));
+        let sin_avisos = |p: &str| crate::tui::prueba::sin_menu(p).lines().enumerate().filter(|(i, _)| Some(*i) != fila_aviso).map(|(_, l)| l.to_string()).collect::<Vec<_>>();
         assert_eq!(sin_avisos(&antes), sin_avisos(&ahora));
         std::fs::remove_dir_all(dir).unwrap();
     }

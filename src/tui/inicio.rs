@@ -395,11 +395,15 @@ fn alto_plazo(w: u16) -> u16 {
     1 + if con_cajita(w) { CAJITA_PLAZO.1 } else { 3 }
 }
 
-/// El próximo plazo desde arriba de `area`: el título y la cajita con el último día y, al lado, cuál es, sus fechas
+/// El próximo plazo desde arriba de `area` (y en su título, en rojo, cuántos modelos hay vencidos): la cajita con el último día y, al lado, cuál es, sus fechas
 /// y cuánto falta; si no cabe la cajita, solo el texto.
-fn pintar_plazo(f: &mut Frame, area: Rect, (q, ini, fin): &(String, String, String), limite: Rect) {
+fn pintar_plazo(f: &mut Frame, area: Rect, (q, ini, fin): &(String, String, String), limite: Rect, vencidos: usize) {
     let fila = |y: u16, x: u16| Rect { x: area.x + x, y: area.y + y, width: area.width.saturating_sub(x), height: 1 }.intersection(limite);
-    f.render_widget(Paragraph::new(titulo_bloque("próximo plazo")), fila(0, 0));
+    let mut titulo = titulo_bloque("próximo plazo");
+    if vencidos > 0 {
+        titulo.push_span(Span::styled(format!(" · {vencidos} vencido{}", if vencidos == 1 { "" } else { "s" }), negrita().fg(tema::MAL)));
+    }
+    f.render_widget(Paragraph::new(titulo), fila(0, 0));
     let (cual, fechas, falta) = textos_plazo(q, ini, fin, con_cajita(area.width));
     if con_cajita(area.width) {
         let caja = Rect { y: area.y + 1, height: CAJITA_PLAZO.1, ..area }.intersection(limite);
@@ -485,6 +489,12 @@ impl Inicio {
         } else {
             arriba.extend(envolver(&[(ahora.to_string(), gris)], area.width as usize, 0));
         }
+        // Lo vencido va junto al próximo plazo, sin quitarle sitio a nada; si no hay plazo que enseñar, aquí arriba.
+        if ctx.vencidos > 0 && i.proximo_plazo.is_none() {
+            let que = if ctx.vencidos == 1 { "Tienes 1 modelo vencido sin presentar".to_string() } else { format!("Tienes {} modelos vencidos sin presentar", ctx.vencidos) };
+            let aviso = envolver(&[(que, negrita().fg(tema::MAL)), (" · pulsa a y 3".to_string(), gris)], area.width as usize, 0);
+            arriba.splice(0..0, aviso);
+        }
         let n_arriba = arriba.len() as u16;
         // Debajo, la fila de tus datos (y, con aire, una vacía encima).
         let medio = Rect { y: area.y + n_arriba + 1, height: area.height.saturating_sub(n_arriba + 1 + 1 + u16::from(holgado)), ..area };
@@ -567,7 +577,7 @@ impl Pantalla for Inicio {
             pintar_anio(f, r, filas, plan.medio);
         }
         if let (Some(r), Some(p)) = (plan.plazo, &self.i.proximo_plazo) {
-            pintar_plazo(f, r, p, plan.medio);
+            pintar_plazo(f, r, p, plan.medio, ctx.vencidos);
         }
         for (r, lineas) in plan.bloques {
             f.render_widget(Paragraph::new(lineas), r);

@@ -24,7 +24,7 @@ mod gastos_cuotas;
 mod gastos_formulario;
 mod gestor;
 pub mod impuestos;
-mod impuestos_anio;
+mod impuestos_ahora;
 mod impuestos_casillas;
 pub mod impuestos_trimestre;
 pub mod inicio;
@@ -76,6 +76,11 @@ pub struct Ctx {
     pub ir_a: Option<&'static str>,
     /// Una pantalla pide elegir uno de los PDF de un año (no tiene uno concreto que abrir).
     pub pdfs_de: Option<i32>,
+    /// Cuántos modelos hay fuera de plazo y sin presentar: se avisa en rojo en el menú, en su pestaña y en Inicio.
+    pub vencidos: usize,
+    /// Al abrir la app, hasta que acaba la primera lectura de los PDF: aún no se sabe qué se presentó ni cuándo estabas
+    /// de alta, así que no se avisa de nada vencido.
+    pub sin_leer: bool,
     /// Tu certificado digital (para traer lo último de Hacienda y la Seguridad Social). La app no se abre sin él;
     /// solo en las pruebas falta.
     pub certificado: Option<Arc<crate::red::certificado::Certificado>>,
@@ -91,7 +96,7 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(datos: Datos, dir: PathBuf) -> Self {
-        Ctx { datos, dir, anio: fmt::anio_actual(), aviso: None, generacion: 0, leyendo: None, ir_a: None, pdfs_de: None, certificado: None, sincronizando: None, sincronizado: None, copia_hecha: false, sin_disco: false, _candado: None }
+        Ctx { datos, dir, anio: fmt::anio_actual(), aviso: None, generacion: 0, leyendo: None, ir_a: None, pdfs_de: None, vencidos: 0, sin_leer: false, certificado: None, sincronizando: None, sincronizado: None, copia_hecha: false, sin_disco: false, _candado: None }
     }
 
     /// Abre la carpeta de una persona: sus datos y el candado (una sola ventana por carpeta).
@@ -300,11 +305,13 @@ pub struct App {
     documentos: documentos::Documentos,
     /// La ventana para elegir gestor (con `G`).
     elegir_gestor: Option<gestor::Elegir>,
+    /// Con qué datos y qué día se contó lo vencido (`ctx.vencidos`).
+    vencidos_de: Option<(u64, String)>,
 }
 
 impl App {
     pub fn new(ctx: Ctx) -> Self {
-        let mut app = App { ctx, secciones: menu::secciones(), activa: 0, salir: false, ayuda: false, elegir_pdf: None, fallos: None, lectura: None, red: None, documentos: Default::default(), elegir_gestor: None };
+        let mut app = App { ctx, secciones: menu::secciones(), activa: 0, salir: false, ayuda: false, elegir_pdf: None, fallos: None, lectura: None, red: None, documentos: Default::default(), elegir_gestor: None, vencidos_de: None };
         app.entrar();
         app
     }
@@ -324,7 +331,27 @@ impl App {
         self.pantalla().titulo()
     }
 
+    /// Cuenta lo vencido si han cambiado los datos o el día.
+    fn contar_vencidos(&mut self) {
+        if self.ctx.sin_leer {
+            return;
+        }
+        let k = (self.ctx.generacion, fmt::hoy());
+        if self.vencidos_de.as_ref() != Some(&k) {
+            let autonomo = informe::situacion(&self.ctx.datos).autonomo;
+            self.ctx.vencidos = if autonomo { impuestos_ahora::vencidos(&self.ctx.datos, &k.1) } else { 0 };
+            self.vencidos_de = Some(k);
+        }
+    }
+
+    /// ¿Va en rojo esta sección? La que tiene los modelos, si hay alguno vencido.
+    fn en_rojo(&self, s: &Seccion) -> bool {
+        self.ctx.vencidos > 0 && s.pantallas.iter().any(|p| p.titulo() == impuestos::TITULO)
+    }
+
     fn entrar(&mut self) {
+        // Por si los datos cambiaron sin pasar por `guardar`.
+        self.vencidos_de = None;
         // Lo que haga la pantalla al entrar, ya con el color de su sección.
         tema::poner_seccion(self.secciones[self.activa].tecla);
         let s = &mut self.secciones[self.activa];
@@ -396,6 +423,7 @@ impl App {
 
     /// Lee en otro hilo los PDF de Hacienda que no estén ya en la caché; la app sigue respondiendo mientras.
     pub fn leer_en_segundo_plano(&mut self) {
+        self.ctx.sin_leer = self.ctx.generacion == 0;
         let (tx, rx) = mpsc::channel();
         let dir = self.ctx.dir.clone();
         std::thread::spawn(move || {
@@ -483,6 +511,7 @@ impl App {
         if let Some(l) = fin {
             let leidos = l.rentas.len() + l.formularios.len();
             self.ctx.datos.lecturas = l;
+            self.ctx.sin_leer = false;
             self.ctx.leyendo = None;
             self.ctx.generacion += 1;
             self.lectura = None;
@@ -629,6 +658,7 @@ impl App {
     }
 
     pub fn dibujar(&mut self, f: &mut Frame) {
+        self.contar_vencidos();
         let area = f.area();
         let filas = self.lineas_pie(area.width >= ANCHO_CARRIL, ancho_pie(area.width)).len();
         // Las teclas de la pantalla pueden depender de lo que calcula al dibujarse (lo elegido de una lista…): si
@@ -744,12 +774,14 @@ impl App {
             }
             let txt = format!("{} {}", j + 1, p.titulo());
             let n = txt.chars().count();
+            let rojo = self.ctx.vencidos > 0 && p.titulo() == impuestos::TITULO;
             if j == s.activa {
                 (ini, largo) = (col, n);
-                v.push(Span::styled(txt, Style::new().fg(tema::acento()).add_modifier(Modifier::BOLD)));
+                v.push(Span::styled(txt, Style::new().fg(if rojo { tema::MAL } else { tema::acento() }).add_modifier(Modifier::BOLD)));
             } else {
                 v.push(Span::styled((j + 1).to_string(), tema::apagado()));
-                v.push(Span::raw(format!(" {}", p.titulo())));
+                let st = if rojo { Style::new().fg(tema::MAL).add_modifier(Modifier::BOLD) } else { Style::new() };
+                v.push(Span::styled(format!(" {}", p.titulo()), st));
             }
             col += n;
         }
@@ -799,10 +831,13 @@ impl App {
             let s = &self.secciones[i];
             let color = tema::seccion(s.tecla);
             let letra = format!(" {} ", s.tecla);
+            let rojo = Style::new().fg(tema::MAL).add_modifier(Modifier::BOLD);
             let l = if i == self.activa {
-                Line::from(vec![Span::styled(letra, Style::new().fg(tema::FONDO).bg(color).add_modifier(Modifier::BOLD)), Span::raw("  "), Span::styled(s.nombre, Style::new().fg(color).add_modifier(Modifier::BOLD))])
+                let nombre = if self.en_rojo(s) { rojo } else { Style::new().fg(color).add_modifier(Modifier::BOLD) };
+                Line::from(vec![Span::styled(letra, Style::new().fg(tema::FONDO).bg(color).add_modifier(Modifier::BOLD)), Span::raw("  "), Span::styled(s.nombre, nombre)])
             } else {
-                Line::from(vec![Span::styled(letra, Style::new().fg(color).add_modifier(Modifier::BOLD)), Span::raw("  "), Span::styled(s.nombre, tema::apagado())])
+                let nombre = if self.en_rojo(s) { rojo } else { tema::apagado() };
+                Line::from(vec![Span::styled(letra, Style::new().fg(color).add_modifier(Modifier::BOLD)), Span::raw("  "), Span::styled(s.nombre, nombre)])
             };
             f.render_widget(Paragraph::new(l), Rect::new(area.x + 2, area.y + y, CONTENIDO - 3, 1).intersection(area));
         }
@@ -863,11 +898,12 @@ impl App {
             }
             let s = &self.secciones[i];
             let color = tema::seccion(s.tecla);
+            let aviso = if self.en_rojo(s) { tema::MAL } else { color };
             if i == self.activa {
                 l0.push(Span::styled(format!(" {} ", s.tecla), Style::new().fg(tema::FONDO).bg(color).add_modifier(Modifier::BOLD)));
-                l0.push(Span::styled(format!(" {}", s.nombre), negrita.fg(color)));
+                l0.push(Span::styled(format!(" {}", s.nombre), negrita.fg(aviso)));
             } else {
-                l0.push(Span::styled(s.tecla.to_string(), negrita.fg(color)));
+                l0.push(Span::styled(s.tecla.to_string(), negrita.fg(aviso)));
             }
         }
         let usado = Line::from(l0.clone()).width();
@@ -1279,8 +1315,8 @@ mod tests {
         let pasos = [
             ("a", "Facturas"),
             ("2", "Gastos"),
-            ("3", "Impuestos"),
-            ("9", "Impuestos"),
+            ("3", "Modelos"),
+            ("9", "Modelos"),
             ("e", "Sueldo"),
             ("2", "Nóminas"),
             ("r", "Inicio"),
@@ -1289,7 +1325,7 @@ mod tests {
             ("u", "Calcula tu sueldo"),
             ("2", "Calcula como autónomo"),
             ("1", "Calcula tu sueldo"),
-            ("a", "Impuestos"),
+            ("a", "Modelos"),
             ("1", "Facturas"),
             ("e", "Nóminas"),
         ];
@@ -1425,14 +1461,15 @@ mod tests {
         assert_eq!(filas[0], "  n nuevo         c categoría   D duplicar         S traer lo último   ? ayuda", "{p}");
         assert_eq!(filas[1], "  Enter ficha     / buscar      d borrar                               q salir", "{p}");
         assert_eq!(filas[2], "  ← → trimestre   o documento   - + año", "{p}");
-        // Lo de navegar se va antes que lo de la G (Impuestos); y la G se queda en «G gestor» antes que la S (Nóminas,
+        // Lo de navegar se va antes que lo de la G (Modelos); y la G se queda en «G gestor» antes que la S (Nóminas,
         // a 100 columnas).
         let mut a = con_empleo();
         teclas(&mut a, "a3");
         let p = pie(&mut a, 120, 36);
-        assert!(p.starts_with("    ← → trimestres") && p.ends_with("G cambiar gestor   S traer lo último     ? ayuda   q salir"), "{p}");
-        let p = pie(&mut a, 100, 30);
-        assert!(p.starts_with("    ← → trimestres") && p.ends_with("    G gestor   S traer lo último     ? ayuda   q salir"), "{p}");
+        assert!(p.starts_with("    ↑↓ elegir") && p.ends_with("    G gestor   S traer lo último     ? ayuda   q salir"), "{p}");
+        // A 100 columnas no cabe en una fila: en dos, sin perder ninguna.
+        let p = pantalla(&mut a, 100, 30);
+        assert!(["↑↓ elegir", "Enter casillas", "d ver todo", "o PDF", "G cambiar gestor", "S traer lo último", "q salir"].iter().all(|t| p.contains(t)), "{p}");
         // Escribiendo (el editor de una factura), a 80 columnas: todas las teclas, con lo que dicen recortado.
         ir(&mut a, "Facturas");
         teclas(&mut a, "n<esc>");
@@ -1648,7 +1685,7 @@ mod tests {
         teclas(&mut a, "3<tab>");
         assert_eq!(a.titulo_activa(), "Este año", "la sección siguiente: Patrimonio");
         teclas(&mut a, "<s-tab>");
-        assert_eq!(a.titulo_activa(), "Impuestos");
+        assert_eq!(a.titulo_activa(), "Modelos");
         teclas(&mut a, "r2o");
         assert!(aviso(&a).contains("PDF"), "{}", aviso(&a));
         teclas(&mut a, "S");

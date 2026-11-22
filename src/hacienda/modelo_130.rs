@@ -78,11 +78,10 @@ pub fn minoracion(rn: Option<f64>) -> f64 {
     }
 }
 
-/// ¿El de difícil justificación se resta también en los 130? Por defecto no: solo en la Renta (`fiscal.gdj130`).
-/// Ojo: las instrucciones de la casilla 02 dicen que en la estimación directa simplificada «se incluirán en esta
-/// casilla los importes de las amortizaciones, de las provisiones deducibles y de los gastos de difícil
-/// justificación» del 1 de enero al fin del trimestre (art. 30 RIRPF). Sin restarlo se paga algo más a cuenta, que
-/// se recupera en la Renta.
+/// ¿El de difícil justificación se resta también en los 130? Por defecto no: solo en la Renta (`fiscal.gdj130`), para
+/// que la 02 cuadre con Gastos. Ojo: las instrucciones de la casilla 02 dicen que en la estimación directa simplificada
+/// «se incluirán en esta casilla los importes de las amortizaciones, de las provisiones deducibles y de los gastos de
+/// difícil justificación». Sin restarlo se paga algo más a cuenta, que se recupera en la Renta.
 pub fn con_gdj(d: &Datos) -> bool {
     d.fiscal.gdj && d.fiscal.gdj130
 }
@@ -100,7 +99,7 @@ pub fn calcular(d: &Datos, anio: i32, q: u32, memo: &mut Memo) -> Casillas {
     // «minorada en el importe de la suma de las cantidades consignadas en la casilla 16».
     // 15: los negativos de la casilla 19 de los 130 anteriores del año «que no hubieran sido deducidos», como mucho
     // lo positivo de la 14. Solo cuentan los 130 que tocaba presentar (`obligado`): uno calculado de antes del alta
-    // no se presentó y no deja nada.
+    // o de cuando estabas de baja no se presentó y no deja nada.
     let (mut c5, mut pendiente) = (0.0, 0.0);
     for k in (1..q).filter(|&k| obligado(d, anio, k)) {
         let p = Trimestral::M130.cuenta(d, anio, k, memo);
@@ -151,12 +150,13 @@ pub enum OrigenRn {
 }
 
 /// ¿Tocaba presentar el 130 de ese trimestre? Sí si consta presentado; si no, no antes del alta ni después de la
-/// baja (las fechas de tu perfil, `Datos::fechas_actividad`) ni si te libras (`se_libra`).
+/// baja (las fechas de tu perfil, `Datos::fechas_actividad`), ni de baja en tus 036, ni si te libras (`se_libra`).
 pub fn obligado(d: &Datos, anio: i32, q: u32) -> bool {
     if super::consta(d, anio, q, Modelo::M130) {
         return true;
     }
-    super::modelo_303::en_actividad(d, anio, q) && !se_libra(d, anio, q)
+    let (ini, fin) = periodo(anio, q);
+    super::modelo_303::en_actividad(d, anio, q) && !super::de_baja(d, &ini, &fin) && !se_libra(d, anio, q)
 }
 
 /// ¿Empezó la actividad ese año (o después)? Con la fecha de tu perfil (`Datos::fechas_actividad`).
@@ -291,6 +291,32 @@ mod tests {
         let c = calcular(&d, 2026, 3, &mut Memo::default());
         // Primer año: el anterior cuenta como 0 → 100 € de minoración; nada de 05 ni 15.
         assert_eq!((c.v(4), c.v(5), c.v(13), c.v(15), c.v(19)), (2000.0, 0.0, 100.0, 0.0, 1900.0));
+    }
+
+    /// Los negativos solo vienen de 130 presentados: de baja en el 036 no se presentó nada y no deja nada en la 15.
+    #[test]
+    fn de_baja_no_deja_negativos() {
+        use crate::dominio::CambioCenso;
+        let mut d = con_alta_en_agosto();
+        d.perfil.fecha_alta = "2023-01-01".into();
+        d.lecturas.censo = vec![CambioCenso { fecha: "2025-02-25".into(), alta: false }, CambioCenso { fecha: "2026-08-01".into(), alta: true }];
+        d.fiscal.rn_anterior.insert(2026, 8000.0);
+        assert!(!obligado(&d, 2026, 1) && !obligado(&d, 2026, 2) && obligado(&d, 2026, 3));
+        let c = calcular(&d, 2026, 4, &mut Memo::default());
+        assert_eq!((c.v(13), c.v(15)), (100.0, 0.0));
+    }
+
+    /// La 02 cuadra con Gastos: el de difícil justificación se aplica solo en la Renta.
+    #[test]
+    fn la_02_va_sin_la_dificil_justificacion() {
+        let mut d = con_alta_en_agosto();
+        let sin = calcular(&d, 2026, 3, &mut Memo::default());
+        assert_eq!((sin.v(2), sin.v(3), sin.v(4)), (0.0, 10000.0, 2000.0));
+        assert_eq!(irpf_acumulado(&d, 2026, "2026-09-30").gdj, 500.0);
+        // Quien lo tenga pedido para los 130 lo sigue teniendo.
+        d.fiscal.gdj130 = true;
+        let con = calcular(&d, 2026, 3, &mut Memo::default());
+        assert_eq!((con.v(2), con.v(3), con.v(4)), (500.0, 9500.0, 1900.0));
     }
 
     /// La casilla 13 sale de la Renta del año anterior (0224) antes que de la fecha de alta.

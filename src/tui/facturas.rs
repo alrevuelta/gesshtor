@@ -725,7 +725,7 @@ impl Facturas {
                 if self.q > 0 {
                     format!("No hay facturas en el {}T de {}.{}", self.q, ctx.anio, if self.cerrado { "" } else { " Pulsa n para crear una." })
                 } else if self.cerrado {
-                    format!("No hay facturas de {} en la app. Es un año cerrado: se ve en Impuestos, con tu Renta.", ctx.anio)
+                    format!("No hay facturas de {} en la app. Es un año cerrado: se ve en Resumen › Años, con tu Renta.", ctx.anio)
                 } else {
                     format!("Todavía no hay facturas en {}. Pulsa n para crear la primera.", ctx.anio)
                 }
@@ -999,7 +999,7 @@ impl Pantalla for Facturas {
                 self.sel = 0;
                 self.ver = false;
             }
-            // El trimestre, con ← →, como en Gastos e Impuestos: 1T 2T 3T 4T año (sin dar la vuelta). En el detalle,
+            // El trimestre, con ← →, como en Gastos y Modelos: 1T 2T 3T 4T año (sin dar la vuelta). En el detalle,
             // ← → pasan de factura (arriba).
             KeyCode::Left | KeyCode::Right => {
                 self.q = otro_trimestre(self.q, k.code == KeyCode::Left);

@@ -1,7 +1,6 @@
 //! Lo que comparten el Resumen y los Impuestos: en qué punto está cada modelo de un trimestre (presentado, en
 //! plazo, vencido…), lo que se presentó y cómo se dice un resultado. Sin red: solo con lo que hay en `datos.json`.
 use crate::dominio::fmt::DIF;
-use crate::hacienda::modelo::Memo;
 use crate::hacienda::{modelo_130, modelo_303};
 use crate::dominio::{factura, fmt};
 use crate::hacienda::{self, Modelo, Plazo, Trimestral};
@@ -183,7 +182,7 @@ pub fn estado_modelo(d: &Datos, hoy: &str, anio: i32, q: u32, modelo: Trimestral
     let (ini, fin) = fmt::periodo(anio, q);
     let p = plazo(anio, q);
     let pres = presentado(d, anio, q, modelo.modelo());
-    Caso {
+    let e = Caso {
         hoy,
         ini: &ini,
         fin: &fin,
@@ -195,7 +194,11 @@ pub fn estado_modelo(d: &Datos, hoy: &str, anio: i32, q: u32, modelo: Trimestral
         exento: modelo == Trimestral::M130 && pres.is_none() && modelo_130::se_libra(d, anio, q),
         actividad: hay_actividad(d, &ini, &fin),
     }
-    .estado()
+    .estado();
+    if pres.is_none() && !matches!(e, Estado::NoToca(_)) && hacienda::de_baja(d, &ini, &fin) {
+        return Estado::NoToca("de baja en Hacienda");
+    }
+    e
 }
 
 /// El estado de la Renta de un año (se presenta de abril a junio del siguiente).
@@ -256,77 +259,14 @@ pub fn pdf(dir: &Path, d: &Datos, anio: i32, q: u32, modelo: Modelo) -> Option<P
     hacienda::pdf_periodo(dir, anio, q, modelo.codigo())
 }
 
-/* ================= actividad y pendientes ================= */
+/* ================= actividad ================= */
 
-/// ¿Hay facturas o gastos entre esas fechas?
+/// ¿Hay facturas, gastos o cuotas de autónomo entre esas fechas? Si los hay y no consta nada presentado, el modelo sale
+/// vencido: a la persona se le puede haber olvidado. Una regularización no cuenta: se carga meses después de lo que
+/// regulariza y no dice que ese trimestre hubiera actividad.
 pub fn hay_actividad(d: &Datos, ini: &str, fin: &str) -> bool {
-    factura::emitidas(d).any(|f| fmt::en_rango(f.devengo(), ini, fin)) || crate::dominio::gasto::apuntados(d).any(|g| fmt::en_rango(&g.fecha, ini, fin))
-}
-
-/// Un trimestre ya empezado con algo por presentar.
-#[derive(Debug, Clone)]
-pub struct Pendiente {
-    pub plazo: Plazo,
-    pub pres303: bool,
-    /// Presentado o exento.
-    pub pres130: bool,
-    /// Casilla 71 del 303 y 19 del 130.
-    pub r303: f64,
-    pub r130: f64,
-    pub vencido: bool,
-    /// En plazo ahora mismo.
-    pub abierto: bool,
-}
-
-impl Pendiente {
-    /// Los modelos que faltan: «303 y 130», «303, 130 y 390».
-    pub fn modelos(&self) -> String {
-        let v: Vec<&str> = self
-            .plazo
-            .modelos
-            .iter()
-            .filter(|m| match m {
-                Modelo::M303 => !self.pres303,
-                Modelo::M130 => !self.pres130,
-                Modelo::M100 | Modelo::M390 => true,
-            })
-            .map(|m| m.codigo())
-            .collect();
-        y_lista(&v)
-    }
-    /// Lo que habrá que pagar (lo presentado ya no cuenta).
-    pub fn a_pagar(&self) -> f64 {
-        let iva = if self.pres303 { 0.0 } else { self.r303.max(0.0) };
-        let irpf = if self.pres130 { 0.0 } else { self.r130.max(0.0) };
-        fmt::r2(iva + irpf)
-    }
-}
-
-/// Los trimestres de un año ya empezados que tienen algo sin presentar. Los vencidos sin facturas ni gastos no
-/// salen (seguramente se presentaron antes de usar la app).
-pub fn pendientes(d: &Datos, hoy: &str, anio: i32, memo: &mut Memo) -> Vec<Pendiente> {
-    let mut v = Vec::new();
-    for p in hacienda::plazos_trimestres(anio) {
-        let (ini, fin) = fmt::periodo(anio, p.q);
-        if ini.as_str() > hoy {
-            continue;
-        }
-        let pres303 = presentado(d, anio, p.q, Modelo::M303).is_some();
-        let exento = modelo_130::se_libra(d, anio, p.q);
-        let pres130 = presentado(d, anio, p.q, Modelo::M130).is_some() || exento;
-        if pres303 && pres130 {
-            continue;
-        }
-        let vencido = hoy > p.fin.as_str();
-        if vencido && !hay_actividad(d, &ini, &fin) {
-            continue;
-        }
-        let r303 = Trimestral::M303.resultado_de(&Trimestral::M303.cuenta(d, anio, p.q, memo));
-        let r130 = Trimestral::M130.resultado_de(&Trimestral::M130.cuenta(d, anio, p.q, memo));
-        let abierto = hoy >= p.ini.as_str() && hoy <= p.fin.as_str();
-        v.push(Pendiente { vencido, abierto, pres303, pres130, r303, r130, plazo: p });
-    }
-    v
+    let es_gasto_o_cuota = |g: &&crate::dominio::gasto::Gasto| crate::dominio::gasto::recibo_de(g, d).is_none_or(|r| r.es_cuota());
+    factura::emitidas(d).any(|f| fmt::en_rango(f.devengo(), ini, fin)) || d.gastos.iter().filter(es_gasto_o_cuota).any(|g| fmt::en_rango(&g.fecha, ini, fin))
 }
 
 /* ================= textos ================= */
