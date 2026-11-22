@@ -32,8 +32,8 @@ use trimestre::Estado;
 use super::{impuestos_anio, impuestos_casillas as casillas, impuestos_trimestre as trimestre};
 use crate::dominio::Valor;
 
-/// Desde este ancho del contenido, el 303 y el 130 van uno al lado del otro (a 120 columnas, el contenido tiene 96).
-const ANCHO_DOBLE: u16 = 96;
+/// Desde este ancho del contenido, el 303 y el 130 van uno al lado del otro (a 120 columnas, el contenido tiene 94).
+const ANCHO_DOBLE: u16 = 94;
 /// Columnas entre el 303 y el 130.
 const HUECO: usize = 4;
 /// Lo más ancho del nombre de una casilla: con más sitio, los importes quedarían lejos de su nombre.
@@ -1232,8 +1232,8 @@ mod tests {
     }
 
     /// Lo presentado frente a tus datos, en un sello: el 303 cuadra; el 130 se presentó con 2,48 € de más. Uno al
-    /// lado del otro (a 96 columnas) y uno debajo del otro (a 76), sin pasarse de ancho y sin perder de dónde sale
-    /// cada casilla.
+    /// lado del otro (a 94 columnas, las del contenido a 120) y uno debajo del otro (a 74, a 100), sin pasarse de
+    /// ancho y sin perder de dónde sale cada casilla.
     #[test]
     fn el_sello_dice_si_cuadra() {
         use crate::dominio::{Factura, FormularioLeido, Linea, Num};
@@ -1252,7 +1252,7 @@ mod tests {
         let nuevo = |m, memo: &mut Memo| Modelo::nuevo(&app.ctx, "2026-05-01", 2026, 1, m, memo);
         let t = DelTrimestre { clave: clave(&app.ctx, 1), m303: nuevo(Trimestral::M303, &mut memo), m130: nuevo(Trimestral::M130, &mut memo) };
         tema::poner_seccion('a');
-        for ancho in [96, 76] {
+        for ancho in [ANCHO_DOBLE as usize, 74] {
             let v = documento(&t, &app.ctx.datos, ancho, false);
             let texto: String = v.iter().map(|l| l.to_string() + "\n").collect();
             assert!(v.iter().all(|l| l.width() <= ancho), "{texto}");
@@ -1261,8 +1261,20 @@ mod tests {
             assert!(texto.contains("· 1 factura") || texto.contains("09: 1 factura"), "{texto}");
         }
         // Uno al lado del otro: los dos títulos en la misma fila.
-        let v = documento(&t, &app.ctx.datos, 96, false);
+        let v = documento(&t, &app.ctx.datos, ANCHO_DOBLE as usize, false);
         assert!(v[0].to_string().contains("IVA · modelo 303") && v[0].to_string().contains("IRPF · modelo 130"), "{}", v[0]);
+    }
+
+    /// A 120 columnas, con el carril, el contenido tiene `ANCHO_DOBLE`: el 303 y el 130 de un trimestre, uno al lado
+    /// del otro; a 100, uno debajo del otro.
+    #[test]
+    fn a_120_columnas_el_303_y_el_130_lado_a_lado() {
+        let mut a = super::super::prueba::app();
+        super::super::prueba::ir(&mut a, "Impuestos");
+        super::super::prueba::teclas(&mut a, "<left>");
+        let juntos = |p: String| p.lines().any(|l| l.contains("IVA · modelo 303") && l.contains("IRPF · modelo 130"));
+        assert!(juntos(super::super::prueba::pantalla(&mut a, 120, 36)));
+        assert!(!juntos(super::super::prueba::pantalla(&mut a, 100, 30)));
     }
 
     /// Cada estado de un trimestre (aún no, en curso, en plazo, vencido, sin datos), uno al lado del otro y uno
@@ -1280,7 +1292,7 @@ mod tests {
             let mut memo = Memo::default();
             let mut nuevo = |m| Modelo::nuevo(&app.ctx, hoy, 2026, q, m, &mut memo);
             let t = DelTrimestre { clave: clave(&app.ctx, q), m303: nuevo(Trimestral::M303), m130: nuevo(Trimestral::M130) };
-            for ancho in [96, 76] {
+            for ancho in [ANCHO_DOBLE as usize, 74] {
                 let v = documento(&t, &app.ctx.datos, ancho, false);
                 let texto: String = v.iter().map(|l| l.to_string() + "\n").collect();
                 assert!(v.iter().all(|l| l.width() <= ancho), "{hoy} a {ancho}: {texto}");

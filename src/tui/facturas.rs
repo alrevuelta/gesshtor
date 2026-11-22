@@ -6,7 +6,7 @@ use crate::dominio::factura::{self, mencion_iva, serie_factura, siguiente_numero
 use crate::dominio::fmt::{self, dmy, eur, fecha_corta, pct};
 use crate::dominio::{uid, Cliente, Datos, Factura, Linea, Num};
 use crate::informe::autonomo;
-use crate::tui::widgets::{coincide, derecha, guia, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
+use crate::tui::widgets::{chips_trimestre, coincide, derecha, guia, otro_trimestre, tema, Confirmar, Entrada, Formulario, Respuesta, Resultado};
 use crate::tui::texto::lineas;
 use crate::tui::{Ctx, Pantalla};
 use editor::{Editor, Salida};
@@ -441,6 +441,8 @@ enum Col {
 pub struct Facturas {
     sel: usize,
     tabla: TableState,
+    /// Trimestre que se ve (0 = todo el año), como en Gastos.
+    q: u32,
     filtro: Filtro,
     busca: Entrada,
     buscando: bool,
@@ -464,14 +466,16 @@ pub struct Facturas {
 }
 
 impl Facturas {
-    /// Índices (en `d.facturas`) de las que se ven: emitidas primero, de la más nueva a la
-    /// más antigua, y después los borradores (de cualquier año; en un año cerrado no salen: no se pueden tocar).
+    /// Índices (en `d.facturas`) de las que se ven: emitidas primero (las del trimestre, si hay uno elegido), de la
+    /// más nueva a la más antigua, y después los borradores (de cualquier año y trimestre: aún no tienen fecha que
+    /// cuente; en un año cerrado no salen: no se pueden tocar).
     fn lista(&self, d: &Datos, anio: i32) -> Vec<usize> {
         let abierto = !autonomo::cerrado(d, anio);
         let mut v: Vec<usize> = (0..d.facturas.len())
             .filter(|&i| {
                 let f = &d.facturas[i];
-                (if f.borrador() { abierto } else { fmt::anio_de(&f.fecha) == anio }) && self.filtro.deja(f) && {
+                let en_el_periodo = fmt::anio_de(&f.fecha) == anio && (self.q == 0 || fmt::trimestre_de(&f.fecha) == self.q);
+                (if f.borrador() { abierto } else { en_el_periodo }) && self.filtro.deja(f) && {
                     let conceptos: Vec<&str> = f.lineas.iter().map(|l| l.concepto.as_str()).collect();
                     coincide(&format!("{} {} {} {}", f.numero, f.cliente.nombre, f.cliente.nif, conceptos.join(" ")), &self.busca.valor)
                 }
@@ -489,8 +493,13 @@ impl Facturas {
         self.lista(&ctx.datos, ctx.anio).get(self.sel).copied()
     }
 
+    /// Elige la factura `id`; si no está en el trimestre que se ve (la recién emitida, con su fecha), con todo el año.
     fn ir_a(&mut self, ctx: &Ctx, id: &str) {
-        if let Some(p) = self.lista(&ctx.datos, ctx.anio).iter().position(|&i| ctx.datos.facturas[i].id == id) {
+        let pos = |s: &Self| s.lista(&ctx.datos, ctx.anio).iter().position(|&i| ctx.datos.facturas[i].id == id);
+        if pos(self).is_none() && self.q != 0 {
+            self.q = 0;
+        }
+        if let Some(p) = pos(self) {
             self.sel = p;
         }
     }
@@ -643,23 +652,24 @@ impl Facturas {
         }
     }
 
-    /// Arriba de la lista: los filtros (el elegido en FONDO sobre el color de la sección) y cuántas se ven. Las
-    /// teclas (`f`, `/`, `C`…) y el año, solo abajo y arriba: aquí no se repiten. En la fila de debajo, si se busca,
-    /// la búsqueda.
+    /// Arriba de la lista, como en Gastos: los trimestres (el elegido en FONDO sobre el color de la sección), el
+    /// filtro si hay uno elegido («Pendientes de cobro», «Borradores») y cuántas se ven. Las teclas (← →, `f`, `/`…)
+    /// y el año, solo abajo y arriba: aquí no se repiten. En la fila de debajo, si se busca, la búsqueda.
     fn dibujar_filtros(&self, f: &mut Frame, area: Rect, _ctx: &Ctx, n: usize) {
         let gris = tema::apagado();
         let negrita = Style::new().add_modifier(Modifier::BOLD);
-        let mut v = Vec::new();
-        for (i, x) in [Filtro::Todas, Filtro::Pendientes, Filtro::Borradores].into_iter().enumerate() {
-            if i > 0 {
-                v.push(Span::raw("  "));
+        let linea = |hueco: &'static str| {
+            let mut v = chips_trimestre(self.q);
+            if self.filtro != Filtro::Todas {
+                v.extend([Span::raw(hueco), Span::styled(format!(" {} ", self.filtro.nombre()), tema::pestana_activa())]);
             }
-            // Todas con su hueco a cada lado: al cambiar de filtro no se mueve nada.
-            v.push(Span::styled(format!(" {} ", x.nombre()), if x == self.filtro { tema::pestana_activa() } else { gris }));
-        }
-        v.extend([Span::raw("     "), Span::styled(plural(n), gris)]);
+            v.extend([Span::raw(hueco), Span::styled(plural(n), gris)]);
+            Line::from(v)
+        };
+        let variantes = [linea("     "), linea("   ")];
+        let l = variantes.iter().find(|l| l.width() <= area.width as usize).unwrap_or(&variantes[1]).clone();
         let fila = Rect { height: area.height.min(1), ..area };
-        f.render_widget(Paragraph::new(Line::from(v)), fila);
+        f.render_widget(Paragraph::new(l), fila);
         if (self.buscando || !self.busca.valor.is_empty()) && area.height >= 2 {
             let fila = Rect { y: area.y + 1, height: 1, ..area };
             let [e, t] = Layout::horizontal([Constraint::Length(7), Constraint::Min(1)]).areas(fila);
@@ -668,11 +678,13 @@ impl Facturas {
         }
     }
 
-    /// Lo facturado en el año (por la fecha que cuenta para los impuestos, como el 303 y el 130), con puntos guía:
-    /// la base, el IVA, las retenciones y lo pendiente de cobro (en AVISO si hay), cada cifra con su nota en gris.
+    /// Lo facturado en el año o en el trimestre elegido (por la fecha que cuenta para los impuestos, como el 303 y el
+    /// 130), con puntos guía: la base, el IVA, las retenciones y lo pendiente de cobro (en AVISO si hay), cada cifra
+    /// con su nota en gris.
     fn dibujar_resumen(&self, f: &mut Frame, area: Rect, ctx: &Ctx) {
         let (mut base, mut cuota, mut ret, mut pend, mut n, mut np) = (0.0, 0.0, 0.0, 0.0, 0, 0);
-        for x in factura::emitidas(&ctx.datos).filter(|x| fmt::anio_de(x.devengo()) == ctx.anio) {
+        let cuenta = |x: &&Factura| fmt::anio_de(x.devengo()) == ctx.anio && (self.q == 0 || fmt::trimestre_de(x.devengo()) == self.q);
+        for x in factura::emitidas(&ctx.datos).filter(cuenta) {
             let t = totales_factura(x);
             base += t.base;
             cuota += t.cuota;
@@ -685,7 +697,7 @@ impl Facturas {
         }
         let st_pend = if pend > 0.005 { Style::new().fg(tema::AVISO) } else { Style::new() };
         let filas = [
-            (format!("facturado en {}", ctx.anio), eur(base), Style::new(), format!("base de {}", plural(n))),
+            (if self.q == 0 { format!("facturado en {}", ctx.anio) } else { format!("facturado en el {}T", self.q) }, eur(base), Style::new(), format!("base de {}", plural(n))),
             ("IVA repercutido".to_string(), eur(cuota), Style::new(), "va al modelo 303".to_string()),
             ("retenciones".to_string(), eur(ret), Style::new(), "a cuenta del IRPF".to_string()),
             ("pendiente de cobro".to_string(), eur(pend), st_pend, format!("de {}", plural(np))),
@@ -710,7 +722,9 @@ impl Facturas {
         let d = &ctx.datos;
         if lista.is_empty() {
             let txt = if self.filtro == Filtro::Todas && self.busca.valor.is_empty() {
-                if self.cerrado {
+                if self.q > 0 {
+                    format!("No hay facturas en el {}T de {}.{}", self.q, ctx.anio, if self.cerrado { "" } else { " Pulsa n para crear una." })
+                } else if self.cerrado {
                     format!("No hay facturas de {} en la app. Es un año cerrado: se ve en Impuestos, con tu Renta.", ctx.anio)
                 } else {
                     format!("Todavía no hay facturas en {}. Pulsa n para crear la primera.", ctx.anio)
@@ -985,6 +999,12 @@ impl Pantalla for Facturas {
                 self.sel = 0;
                 self.ver = false;
             }
+            // El trimestre, con ← →, como en Gastos e Impuestos: 1T 2T 3T 4T año (sin dar la vuelta). En el detalle,
+            // ← → pasan de factura (arriba).
+            KeyCode::Left | KeyCode::Right => {
+                self.q = otro_trimestre(self.q, k.code == KeyCode::Left);
+                self.sel = 0;
+            }
             KeyCode::Char('n') => {
                 self.ver = false;
                 self.editor = Some(Box::new(Editor::nueva(nueva_factura(&ctx.datos), &ctx.datos)));
@@ -1057,7 +1077,7 @@ impl Pantalla for Facturas {
                 None => vec![],
             };
             if !self.ver {
-                v.extend([("f", "filtro"), ("/", "buscar"), ("C", "clientes")]);
+                v.extend([("← →", "trimestre"), ("f", "filtro"), ("/", "buscar"), ("C", "clientes")]);
             }
             return v;
         }
@@ -1071,7 +1091,7 @@ impl Pantalla for Facturas {
         let mut v = vec![("n", "nueva")];
         v.extend(primeras);
         if !self.ver {
-            v.extend([("f", "filtro"), ("/", "buscar"), ("C", "clientes")]);
+            v.extend([("← →", "trimestre"), ("f", "filtro"), ("/", "buscar"), ("C", "clientes")]);
         }
         v.extend(resto);
         v
@@ -1093,7 +1113,7 @@ mod tests {
         let mut a = app_con(d, &dir);
         ir(&mut a, "Facturas");
         let p = pantalla(&mut a, 120, 36);
-        assert!(p.contains(" Todas    Pendientes de cobro    Borradores ") && p.contains(&format!("facturado en {} ··", anio_actual())), "{p}");
+        assert!(p.contains(" 1T   2T   3T   4T   año ") && p.contains(&format!("facturado en {} ··", anio_actual())), "{p}");
         // Arriba, sin las teclas ni el año (ya están en el pie y en la cabecera).
         assert!(!p.contains("f  Todas") && !p.contains(&format!("{} · ", anio_actual())), "{p}");
         assert!(p.contains("pendiente de cobro ··") && !p.contains('│') && !p.contains('╭'), "{p}");
@@ -1109,5 +1129,32 @@ mod tests {
         assert!(p.contains("Nueva factura (borrador)") && p.contains("› Cliente") && p.contains("líneas (0)"), "{p}");
         // Y en un terminal estrecho, también.
         assert!(pantalla(&mut a, 80, 24).contains("líneas (0)"));
+    }
+
+    /// Con ← →, el trimestre, como en Gastos: la lista (con los borradores, que aún no tienen fecha que cuente) y lo
+    /// facturado, solo de ese trimestre; en el detalle, ← → siguen pasando de factura. Con `f`, el filtro elegido sale
+    /// arriba, junto a los trimestres.
+    #[test]
+    fn por_trimestres() {
+        let dir = caso("a-de-todo");
+        let mut d = cargar(&dir);
+        super::super::tests::factura_de_hoy(&mut d);
+        let mut a = app_con(d, &dir);
+        ir(&mut a, "Facturas");
+        let q = crate::dominio::fmt::trimestre_de(&crate::dominio::fmt::hoy());
+        // Del año, ← va al 4T, luego al 3T…: hasta el de hoy.
+        teclas(&mut a, &"<left>".repeat(5 - q as usize));
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains(&format!("facturado en el {q}T ··")) && p.contains("HOY-1") && p.contains("borrador"), "{p}");
+        // En otro trimestre, la de hoy no está.
+        teclas(&mut a, if q > 1 { "<left>" } else { "<right>" });
+        let p = pantalla(&mut a, 120, 36);
+        assert!(!p.contains("HOY-1") && p.contains("borrador"), "{p}");
+        // → hasta el final: el año entero, sin dar la vuelta.
+        teclas(&mut a, &"<right>".repeat(6));
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains(&format!("facturado en {} ··", anio_actual())) && p.contains("HOY-1"), "{p}");
+        teclas(&mut a, "f");
+        assert!(pantalla(&mut a, 120, 36).contains(" año       Pendientes de cobro      "));
     }
 }

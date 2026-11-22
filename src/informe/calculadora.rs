@@ -77,6 +77,21 @@ fn solidaridad(g: &reglas::General, mensual: f64) -> (f64, f64) {
     (empresa, trabajador)
 }
 
+/// Los años que la calculadora tiene enteros (las cotizaciones de asalariados y de autónomos y el IRPF de ese mismo
+/// año), de 2025 al que viene: solo esos se pueden elegir (con las reglas de otro año, el resultado no sería el suyo).
+pub fn anios_con_reglas() -> Vec<i32> {
+    (2025..=crate::dominio::fmt::anio_actual() + 1)
+        .filter(|&y| reglas::general(y).anio == y && reglas::autonomos(y).anio == y && irpf::reglas(y, "").anio == y)
+        .collect()
+}
+
+/// El año con que se abre la calculadora: el último que tiene entero hasta el de hoy (si no, el primero que tenga).
+pub fn anio_por_defecto() -> i32 {
+    let v = anios_con_reglas();
+    let hoy = crate::dominio::fmt::anio_actual();
+    v.iter().rev().find(|&&y| y <= hoy).or(v.first()).copied().unwrap_or(hoy)
+}
+
 /// Un sueldo bruto de un año entero (con las pagas extra), con un contrato indefinido o temporal, en una
 /// comunidad (su clave; "" si no se sabe).
 pub fn asalariado(bruto: f64, temporal: bool, comunidad: &str, anio: i32) -> Asalariado {

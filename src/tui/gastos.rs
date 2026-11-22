@@ -6,7 +6,7 @@ use crate::dominio::fmt::{self, r2};
 use crate::dominio::{Datos, Gasto};
 use crate::dominio::almacen;
 use crate::informe::autonomo;
-use crate::tui::widgets::{coincide, derecha, filas_partidas, guia, linea_atajos, tema, titulo_bloque, Confirmar, Eleccion, Entrada, Respuesta, Selector};
+use crate::tui::widgets::{chips_trimestre, coincide, derecha, filas_partidas, guia, linea_atajos, otro_trimestre, tema, titulo_bloque, Confirmar, Eleccion, Entrada, Respuesta, Selector};
 use crate::tui::texto::lineas;
 use crate::tui::{Ctx, Nivel, Pantalla};
 use formulario::{Edicion, Fin};
@@ -24,9 +24,6 @@ use crate::dominio::tgss::Recibo;
 const ANCHO_FICHA: u16 = 110;
 /// La ficha a pantalla completa, no más ancha de lo que se lee bien (como el detalle de una factura).
 const ANCHO_HOJA: u16 = 60;
-
-/// Los trimestres en el orden en que se ven y se recorren con ← →, como en Impuestos (0, todo el año).
-const ORDEN_Q: [u32; 5] = [1, 2, 3, 4, 0];
 
 #[derive(Default)]
 pub struct Gastos {
@@ -599,9 +596,7 @@ impl Gastos {
             }
             // El trimestre, con ← →, como en Impuestos: 1T 2T 3T 4T año (sin dar la vuelta).
             KeyCode::Left | KeyCode::Right if !ficha => {
-                let i = ORDEN_Q.iter().position(|&q| q == self.q).unwrap_or(4);
-                let j = if k.code == KeyCode::Left { i.saturating_sub(1) } else { (i + 1).min(ORDEN_Q.len() - 1) };
-                self.q = ORDEN_Q[j];
+                self.q = otro_trimestre(self.q, k.code == KeyCode::Left);
                 self.sel = 0;
             }
             KeyCode::Char('c') => self.modo = Modo::Categoria(self.selector_categorias(ctx)),
@@ -699,16 +694,8 @@ impl Gastos {
     fn dibujar_filtros(&self, f: &mut Frame, area: Rect, _ctx: &Ctx, n: usize) {
         let gris = tema::apagado();
         let negrita = Style::new().add_modifier(Modifier::BOLD);
-        let mut trimestres = Vec::new();
         // En el orden de Impuestos: 1T 2T 3T 4T año (← → se mueve por ellos).
-        for (i, &q) in ORDEN_Q.iter().enumerate() {
-            if i > 0 {
-                trimestres.push(Span::raw(" "));
-            }
-            let t = if q == 0 { "año".to_string() } else { format!("{q}T") };
-            // Todos con su hueco a cada lado: al cambiar de trimestre no se mueve nada.
-            trimestres.push(Span::styled(format!(" {t} "), if q == self.q { tema::pestana_activa() } else { gris }));
-        }
+        let trimestres = chips_trimestre(self.q);
         // La categoría, solo si hay una elegida (como el trimestre); luego, cuántos se ven.
         let linea = |hueco: &'static str| {
             let mut v = trimestres.clone();

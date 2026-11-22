@@ -5,6 +5,7 @@
 //! (Enter) o descartarlo (Esc); con «o» se abre el original. Lo que no se ha podido clasificar, lo que ya estaba y lo
 //! que es de un año cerrado también se enseña, con el motivo. Si la función está apagada, se dice cómo encenderla.
 use super::fallos::partir;
+use super::gestor::Mesa;
 use super::juego::{self, Juego};
 use super::widgets::{atajo, barra, centrado, tema, ventana, Entrada};
 use super::{cortar, Ctx};
@@ -15,7 +16,7 @@ use crate::dominio::factura::{nombre_operacion, totales_factura};
 use crate::informe;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
@@ -108,7 +109,12 @@ pub struct Documentos {
     /// El paso de la ruedecita, contado desde `creado` (lo pone `animar`).
     creado: Instant,
     fotograma: usize,
+    /// Cuándo se soltaron los últimos que han ido a Claude, y cuántos eran: para la mesa del gestor (`mesa`).
+    soltado: Option<(Instant, usize)>,
 }
+
+/// Lo que la mesa del gestor dice «¡recibido!» al soltar, antes de ponerse a leer.
+const RECIBIDO: Duration = Duration::from_millis(1500);
 
 /// Lo que se ignora Enter cuando sale la ventana sin que la esperes: estabas escribiendo o eligiendo algo y el Enter
 /// no era para guardar un documento que aún no has visto.
@@ -140,6 +146,7 @@ impl Default for Documentos {
             juego: Juego::new(semilla),
             creado: Instant::now(),
             fotograma: 0,
+            soltado: None,
         }
     }
 }
@@ -174,6 +181,34 @@ impl Documentos {
             (1, 1) => Some("Claude está leyendo un documento…".into()),
             _ => Some(format!("Claude está leyendo tus documentos: {} de {total} leídos…", total - faltan)),
         }
+    }
+
+    /// Cómo está la mesa del gestor `ahora`: recién soltados (un momento, `RECIBIDO`), leyéndose o, leídos todos,
+    /// ordenados en carpetas mientras se revisan. Sin tanda (o cuando no ha ido nada a Claude: apagada, nada que
+    /// leer), esperando; al revisar el último, vuelve a esperar. Si Claude no ha entendido ninguno, no dice «ordenado».
+    pub fn mesa(&self, ahora: Instant) -> Mesa {
+        let Some((cuando, n)) = self.soltado else { return Mesa::Reposo };
+        if self.lista.is_empty() {
+            return Mesa::Reposo;
+        }
+        if ahora.saturating_duration_since(cuando) < RECIBIDO {
+            return Mesa::Recibido(n);
+        }
+        if self.ocupado() {
+            let leidos = self.lista.iter().filter(|x| !matches!(x.estado, Estado::Leyendo)).count();
+            return Mesa::Leyendo { leidos, total: self.lista.len() };
+        }
+        // Una carpeta por cada uno entendido, del color de donde va.
+        let carpetas: Vec<Color> = self
+            .cola
+            .iter()
+            .filter_map(|p| p.resultado.as_ref().ok())
+            .map(|e| if matches!(e.apunte, Apunte::Nomina(_)) { tema::EMPLEO } else { tema::AUTONOMO })
+            .collect();
+        if carpetas.is_empty() {
+            return Mesa::Reposo;
+        }
+        Mesa::Ordenado { carpetas, por_revisar: self.cola.len() }
     }
 
     /// Lo que se mueve (el juego, la ruedecita), hasta `ahora`. Lo llama el bucle de la app mientras se ve la lista.
@@ -239,6 +274,7 @@ impl Documentos {
             return;
         }
         let n = ficheros.len();
+        self.soltado = Some((Instant::now(), rutas.len()));
         ctx.info(if n == 1 { "Claude está leyendo el documento…".to_string() } else { format!("Claude está leyendo {n} documentos…") });
         // En las pruebas no se pregunta a Claude: lo que contesta lo manda la prueba (ver `llega`).
         if cfg!(test) {
@@ -487,6 +523,7 @@ impl Documentos {
         // La tanda siguiente empieza de cero (el récord del juego se queda).
         (self.vistos, self.guardados, self.descartados, self.fallidos) = (0, Vec::new(), 0, 0);
         self.lista.clear();
+        self.soltado = None;
         self.vista = Vista::Oculta;
         self.juego.parar();
     }
@@ -942,10 +979,11 @@ mod tests {
         pegar(&mut a, &v);
         teclas(&mut a, "<space>");
         assert!(a.documentos.juego.en_el_aire());
-        // Oculta (con Esc), la pantalla de debajo está como estaba (salvo la fila de los avisos).
+        // Oculta (con Esc), la pantalla de debajo está como estaba (salvo la fila de los avisos y el carril, donde la
+        // mesa del gestor dice que los ha recibido).
         teclas(&mut a, "<esc>");
         let ahora = pantalla(&mut a, 120, 36);
-        let sin_avisos = |p: &str| p.lines().enumerate().filter(|(i, _)| *i != 33).map(|(_, l)| l.to_string()).collect::<Vec<_>>();
+        let sin_avisos = |p: &str| crate::tui::prueba::sin_menu(p).lines().enumerate().filter(|(i, _)| *i != 33).map(|(_, l)| l.to_string()).collect::<Vec<_>>();
         assert_eq!(sin_avisos(&antes), sin_avisos(&ahora));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1193,6 +1231,104 @@ mod tests {
         teclas(&mut a, "<enter>");
         for (w, h) in [(20, 5), (30, 8), (40, 13)] {
             pantalla(&mut a, w, h);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn nomina_de_octubre() -> Entendido {
+        let n = Nomina { id: "n-oct".into(), anio: fmt::anio_actual(), mes: 10, empresa: "Empresa Inventada".into(), dinerario: 2100.0, ..Default::default() };
+        Entendido { apunte: Apunte::Nomina(n), que: "nómina".into(), moneda: None, avisos: vec![] }
+    }
+
+    /// La mesa del gestor sigue a los documentos: al soltarlos, un momento, «¡recibido!» (con lo que dice el
+    /// gestor); luego, «leyendo»; leídos todos, «ordenado», con una carpeta por cada uno entendido (del color de
+    /// donde va), mientras se revisan; revisados, otra vez esperando.
+    #[test]
+    fn la_mesa_del_gestor_sigue_a_los_documentos() {
+        let mut a = app();
+        let (dir, v) = ficheros(&[("gasto.pdf", b"%PDF gasto"), ("nomina.pdf", b"%PDF nomina"), ("borrosa.jpg", b"foto")]);
+        assert_eq!(a.documentos.mesa(Instant::now()), Mesa::Reposo);
+        assert!(pantalla(&mut a, 120, 36).contains("⇣ arrastra aquí"));
+        pegar(&mut a, &v);
+        assert_eq!(a.documentos.mesa(Instant::now()), Mesa::Recibido(3));
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("✓ ¡recibido! 3") && p.contains("antes de las dos") && p.contains("Leyendo tus documentos"), "{p}");
+        // Pasado el momento, leyendo (el primero que llega es el segundo leído: «leyendo 2 de 3»).
+        let luego = Instant::now() + RECIBIDO;
+        assert_eq!(a.documentos.mesa(luego), Mesa::Leyendo { leidos: 0, total: 3 });
+        llega_el(&mut a, &v[0], Ok(gasto(&fmt::hoy())));
+        assert_eq!(a.documentos.mesa(luego), Mesa::Leyendo { leidos: 1, total: 3 });
+        a.documentos.soltado = Some((Instant::now() - RECIBIDO, 3));
+        assert!(pantalla(&mut a, 120, 36).contains("leyendo 2 de 3"));
+        llega_el(&mut a, &v[1], Ok(nomina_de_octubre()));
+        llega_el(&mut a, &v[2], Err("No se lee bien.".into()));
+        // Leídos: dos carpetas (lo que no se ha entendido, no) y los tres por revisar.
+        assert_eq!(a.documentos.mesa(luego), Mesa::Ordenado { carpetas: vec![tema::AUTONOMO, tema::EMPLEO], por_revisar: 3 });
+        assert!(pantalla(&mut a, 120, 36).contains("3 por revisar"));
+        teclas(&mut a, "<enter><esc>");
+        assert_eq!(a.documentos.mesa(luego), Mesa::Ordenado { carpetas: vec![tema::EMPLEO], por_revisar: 2 });
+        teclas(&mut a, "<esc><enter>");
+        assert!(!a.documentos.abierto());
+        assert_eq!(a.documentos.mesa(luego), Mesa::Reposo);
+        assert!(pantalla(&mut a, 120, 36).contains("⇣ arrastra aquí"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Si no va nada a Claude (apagada, lo pegado no es un fichero, ya lo tienes) o no entiende ninguno, la mesa
+    /// no dice «recibido» ni «ordenado»: sigue esperando.
+    #[test]
+    fn la_mesa_no_dice_lo_que_no_ha_pasado() {
+        let mut a = app();
+        a.documentos.modo = Err(clasificar::COMO_ENCENDER.into());
+        let (dir, v) = ficheros(&[("uno.pdf", b"%PDF uno")]);
+        a.pegar(&v[0].to_string_lossy());
+        assert!(a.documentos.abierto());
+        assert_eq!(a.documentos.mesa(Instant::now()), Mesa::Reposo);
+        let mut a = app();
+        a.documentos.modo = Ok(Modo::Claude);
+        a.pegar("hola, esto no es un fichero");
+        assert_eq!(a.documentos.mesa(Instant::now()), Mesa::Reposo);
+        // Ya metido: no va a Claude.
+        let ya = clasificar::nombre_copia(&clasificar::leer(&v[0]).unwrap());
+        a.ctx.datos.gastos.first_mut().unwrap().doc = ya;
+        pegar(&mut a, &v);
+        assert_eq!(a.documentos.mesa(Instant::now()), Mesa::Reposo);
+        // Ninguno entendido.
+        let mut a = app();
+        let (dir2, v2) = ficheros(&[("otro.pdf", b"%PDF otro")]);
+        pegar(&mut a, &v2);
+        llega_el(&mut a, &v2[0], Err("No se lee.".into()));
+        assert_eq!(a.documentos.mesa(Instant::now() + RECIBIDO), Mesa::Reposo);
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(dir2).unwrap();
+    }
+
+    /// Para ver la mesa del gestor en cada momento, con la ventana de los documentos a su lado: `ESTADO=leyendo W=120
+    /// H=36 cargo test --lib ver_mesa -- --ignored --nocapture` (`recibido`, `leyendo`, `ordenado` u oculta, con
+    /// la lista oculta mientras lee). Con `SALIDA`, también sus colores en JSON (ver `prueba::colores`).
+    #[test]
+    #[ignore]
+    fn ver_mesa() {
+        let var = |k: &str, defecto: &str| std::env::var(k).unwrap_or_else(|_| defecto.into());
+        let mut a = app();
+        let (dir, v) = ficheros(&[("gasto.pdf", b"%PDF gasto"), ("nomina.pdf", b"%PDF nomina"), ("factura.pdf", b"%PDF factura")]);
+        pegar(&mut a, &v);
+        let estado = var("ESTADO", "recibido");
+        if estado != "recibido" {
+            a.documentos.soltado = Some((Instant::now() - RECIBIDO, 3));
+            llega_el(&mut a, &v[0], Ok(gasto(&fmt::hoy())));
+        }
+        if estado == "oculta" {
+            teclas(&mut a, "<esc>");
+        }
+        if estado == "ordenado" {
+            llega_el(&mut a, &v[1], Ok(nomina_de_octubre()));
+            llega_el(&mut a, &v[2], Ok(gasto_de("Imprenta Inventada", 40.0, &fmt::hoy())));
+        }
+        let (w, h) = (var("W", "120").parse().unwrap(), var("H", "36").parse().unwrap());
+        println!("{}", pantalla(&mut a, w, h));
+        if let Ok(salida) = std::env::var("SALIDA") {
+            std::fs::write(salida, crate::tui::prueba::colores(&mut a, w, h)).unwrap();
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

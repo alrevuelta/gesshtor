@@ -243,6 +243,29 @@ pub fn banda(f: &mut Frame, area: Rect, fondo: Color, linea: Line) {
     f.render_widget(Paragraph::new(linea), medio);
 }
 
+/// Los trimestres en el orden en que se ven y se recorren con ← → (en Facturas, Gastos e Impuestos; 0, todo el año).
+pub const ORDEN_Q: [u32; 5] = [1, 2, 3, 4, 0];
+
+/// El trimestre de al lado de `q` en `ORDEN_Q` (con `antes`, el de su izquierda), sin dar la vuelta.
+pub fn otro_trimestre(q: u32, antes: bool) -> u32 {
+    let i = ORDEN_Q.iter().position(|&x| x == q).unwrap_or(ORDEN_Q.len() - 1);
+    ORDEN_Q[if antes { i.saturating_sub(1) } else { (i + 1).min(ORDEN_Q.len() - 1) }]
+}
+
+/// «1T 2T 3T 4T año» en fila, cada uno con su hueco a cada lado (al cambiar no se mueve nada) y el de `q` en FONDO
+/// sobre el color de la sección.
+pub fn chips_trimestre(q: u32) -> Vec<Span<'static>> {
+    let mut v = Vec::new();
+    for (i, &x) in ORDEN_Q.iter().enumerate() {
+        if i > 0 {
+            v.push(Span::raw(" "));
+        }
+        let t = if x == 0 { "año".to_string() } else { format!("{x}T") };
+        v.push(Span::styled(format!(" {t} "), if x == q { tema::pestana_activa() } else { tema::apagado() }));
+    }
+    v
+}
+
 /// Sello: «▕ CUADRA ▏». Los ▕ ▏ en `color` y el texto, en negrita y en `color`, sobre `fondo`. Detrás se puede
 /// seguir la línea (`l.push_span(…)`).
 /// `sello("CUADRA", tema::BIEN, tema::SUAVE_BIEN)` · `sello("2,48 € DE MÁS", tema::AVISO, tema::SUAVE_AVISO)`

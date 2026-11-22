@@ -181,7 +181,7 @@ mod tests {
             .map(|k| generico::CasillaImpresa { pagina: 1 + k / 30, numero: format!("{k:02}"), etiqueta: format!("Casilla de prueba número {k}"), importe: k as f64 * 100.5 })
             .collect();
         let c: Casillas = Ok(Rc::new(c));
-        for (w, h) in [(96, 30), (76, 19)] {
+        for (w, h) in [(94, 30), (74, 19)] {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| x.dibujar(f, f.area(), Some(&c), Some(Tipo::Domiciliado))).unwrap();
             let p: String = t.backend().buffer().content.chunks(w as usize).map(|f| f.iter().map(|c| c.symbol()).collect::<String>().trim_end().to_string() + "\n").collect();

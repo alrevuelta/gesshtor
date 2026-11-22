@@ -14,7 +14,7 @@ pub fn secciones() -> Vec<Seccion> {
         Seccion::new('e', "Empleo", empleo::pantallas()).si(|s| s.empleo),
         Seccion::new('a', "Autónomo", vec![Box::new(facturas::Facturas::default()), Box::new(gastos::Gastos::default()), Box::new(impuestos::Impuestos::default())]).si(|s| s.autonomo),
         Seccion::new('p', "Patrimonio", inversiones::pantallas()),
-        Seccion::new('u', "Utilidades", vec![Box::new(utilidades::Calculadora::default())]),
+        Seccion::new('u', "Utilidades", vec![Box::new(utilidades::Calculadora::asalariado()), Box::new(utilidades::Calculadora::autonomo())]),
     ]
 }
 

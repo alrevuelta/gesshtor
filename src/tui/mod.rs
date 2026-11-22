@@ -1,7 +1,7 @@
 //! La app: secciones (Resumen, Empleo, Autónomo, Patrimonio, Utilidades) con sus pestañas, el año, la barra de abajo
 //! y el bucle de teclas. Se navega con la letra de la sección (`r`, `e`, `a`, `i`, `u`) y el número de la pestaña
 //! (`1`, `2`…). Cada pantalla es un fichero de esta carpeta (y sus partes, `anios_*.rs`, `empleo_*.rs`…); el menú,
-//! en `menu.rs`.
+//! en `menu.rs`; tu gestor, debajo del menú, en `gestor.rs`.
 pub mod anios;
 mod anios_balance;
 mod anios_grafico;
@@ -22,6 +22,7 @@ mod facturas_editor;
 pub mod gastos;
 mod gastos_cuotas;
 mod gastos_formulario;
+mod gestor;
 pub mod impuestos;
 mod impuestos_anio;
 mod impuestos_casillas;
@@ -192,8 +193,9 @@ pub trait Pantalla {
 
 /// Desde este ancho, el carril de la izquierda (el nombre y las secciones); más estrecho, todo arriba.
 const ANCHO_CARRIL: u16 = 100;
-/// La columna donde empiezan las pestañas y el contenido cuando hay carril: nada del contenido se mete en él.
-pub const CONTENIDO: u16 = 22;
+/// La columna donde empiezan las pestañas y el contenido cuando hay carril: nada del contenido se mete en él. El
+/// carril acaba en la 21 (el dibujo del gestor, de la 2 a la 21) y quedan dos columnas de aire.
+pub const CONTENIDO: u16 = 24;
 /// La fila donde empieza el contenido cuando hay carril (las pestañas en la 1, su raya en la 2 y una de aire).
 const FILA_CONTENIDO: u16 = 4;
 /// Columnas libres a la derecha del contenido y, sin carril, también a la izquierda.
@@ -210,20 +212,34 @@ struct Zonas {
     pie: Rect,
 }
 
+/// Las columnas que deja la barra de abajo a cada lado (`MARGEN`; en terminal estrecho, una: cada columna cuenta) y,
+/// dentro de su fondo, antes de las teclas (dos; en terminal estrecho, una), en un terminal de `ancho` columnas.
+fn borde_pie(ancho: u16) -> u16 {
+    if ancho >= ANCHO_CARRIL { MARGEN } else { 1 }
+}
+
+fn dentro_pie(ancho: u16) -> u16 {
+    if ancho >= ANCHO_CARRIL { 2 } else { 1 }
+}
+
+/// Las columnas para las teclas de la barra de abajo, en un terminal de `ancho` columnas.
+fn ancho_pie(ancho: u16) -> usize {
+    ancho.saturating_sub(2 * borde_pie(ancho) + 2 * dentro_pie(ancho)) as usize
+}
+
 impl Zonas {
     /// Con el carril: el contenido desde la columna `CONTENIDO` y la fila `FILA_CONTENIDO`. Sin él: desde la
     /// columna `MARGEN` y, debajo de las dos filas de arriba, una de aire (si hay sitio). Siempre, dos columnas
-    /// libres a la derecha. Abajo, los avisos y, debajo, la barra de las teclas, con `MARGEN` a cada lado y (si hay
-    /// sitio) una fila de aire debajo.
-    fn de(a: Rect) -> Self {
+    /// libres a la derecha. Abajo, los avisos y, debajo, la barra de las teclas (de `filas_pie` filas), con `MARGEN`
+    /// a cada lado y (si hay sitio) una fila de aire debajo.
+    fn de(a: Rect, filas_pie: u16) -> Self {
         let carril = a.width >= ANCHO_CARRIL;
         let (x, y) = if carril { (CONTENIDO, FILA_CONTENIDO) } else { (MARGEN, if a.height >= 20 { 3 } else { 2 }) };
         let x = x.min(a.width);
         let ancho = a.width.saturating_sub(MARGEN).saturating_sub(x);
         let aire = if a.height >= 20 { 1 } else { 0 };
-        // La barra de abajo, con `MARGEN` a cada lado; en terminal estrecho, con uno (cada columna cuenta).
-        let borde = if carril { MARGEN } else { 1 };
-        let fila_pie = a.height.saturating_sub(1 + aire);
+        let borde = borde_pie(a.width);
+        let fila_pie = a.height.saturating_sub(filas_pie + aire);
         let fila_avisos = fila_pie.saturating_sub(1);
         let y = y.min(fila_avisos);
         let una = a.height.min(1);
@@ -231,7 +247,7 @@ impl Zonas {
             carril,
             contenido: Rect::new(a.x + x, a.y + y, ancho, fila_avisos - y),
             avisos: Rect::new(a.x + x, a.y + fila_avisos, ancho, una),
-            pie: Rect::new(a.x + borde.min(a.width), a.y + fila_pie, a.width.saturating_sub(2 * borde), una),
+            pie: Rect::new(a.x + borde.min(a.width), a.y + fila_pie, a.width.saturating_sub(2 * borde), filas_pie.min(a.height - fila_pie)),
         }
     }
 }
@@ -282,11 +298,13 @@ pub struct App {
     red: Option<Receiver<MensajeRed>>,
     /// Los documentos arrastrados al terminal, que clasifica Claude (si se ha encendido).
     documentos: documentos::Documentos,
+    /// La ventana para elegir gestor (con `G`).
+    elegir_gestor: Option<gestor::Elegir>,
 }
 
 impl App {
     pub fn new(ctx: Ctx) -> Self {
-        let mut app = App { ctx, secciones: menu::secciones(), activa: 0, salir: false, ayuda: false, elegir_pdf: None, fallos: None, lectura: None, red: None, documentos: Default::default() };
+        let mut app = App { ctx, secciones: menu::secciones(), activa: 0, salir: false, ayuda: false, elegir_pdf: None, fallos: None, lectura: None, red: None, documentos: Default::default(), elegir_gestor: None };
         app.entrar();
         app
     }
@@ -511,9 +529,25 @@ impl App {
             }
             return;
         }
+        if let Some(v) = &mut self.elegir_gestor {
+            match v.tecla(k) {
+                gestor::Respuesta::Contratado(i) => {
+                    self.elegir_gestor = None;
+                    self.contratar(i);
+                }
+                gestor::Respuesta::Cancelado => self.elegir_gestor = None,
+                gestor::Respuesta::Sigue => {}
+            }
+            return;
+        }
         let capt = self.pantalla().capturando();
         if !capt && k.code == KeyCode::Char('!') {
             self.fallos = Some(fallos::Fallos::new(&self.ctx));
+            return;
+        }
+        // Elegir gestor: reservada, como las de navegar (ninguna pantalla la recibe, salvo escribiendo).
+        if !capt && k.code == KeyCode::Char(gestor::TECLA) && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            self.elegir_gestor = Some(gestor::Elegir { i: gestor::elegido(&self.ctx.datos) });
             return;
         }
         if !capt && self.navegar(k) {
@@ -547,6 +581,15 @@ impl App {
         }
     }
 
+    /// Contrata al gestor `i` de `gestor::GESTORES`: se guarda en tus datos y se dice abajo.
+    fn contratar(&mut self, i: usize) {
+        let g = &gestor::GESTORES[i];
+        self.ctx.datos.gestor = g.clave.to_string();
+        if self.ctx.guardar() {
+            self.ctx.ok(g.contratado);
+        }
+    }
+
     /// Lo que pega el terminal de una vez (al soltar ficheros en él, sus rutas). Escribiendo, se escribe; revisando
     /// un documento, solo a sus euros; si no (también con la lista de los que se leen a la vista), son documentos
     /// para clasificar.
@@ -563,6 +606,7 @@ impl App {
         }
         self.ayuda = false;
         self.elegir_pdf = None;
+        self.elegir_gestor = None;
         self.documentos.pegar(texto, &mut self.ctx);
     }
 
@@ -585,29 +629,47 @@ impl App {
     }
 
     pub fn dibujar(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let filas = self.lineas_pie(area.width >= ANCHO_CARRIL, ancho_pie(area.width)).len();
+        // Las teclas de la pantalla pueden depender de lo que calcula al dibujarse (lo elegido de una lista…): si
+        // luego no caben en las filas de la barra que se le dejaron (o sobra una), otra vez, desde cero.
+        if let Some(otras) = self.dibujar_con(f, filas) {
+            f.render_widget(ratatui::widgets::Clear, area);
+            self.dibujar_con(f, otras);
+        }
+    }
+
+    /// La app, con `filas` filas para la barra de abajo; si al final sus teclas necesitan otras, cuántas.
+    fn dibujar_con(&mut self, f: &mut Frame, filas: usize) -> Option<usize> {
         // El color de la sección, para todo lo que se pinte ahora; y el fondo y la tinta, en toda la pantalla.
         tema::poner_seccion(self.secciones[self.activa].tecla);
         let area = f.area();
         f.buffer_mut().set_style(area, Style::new().fg(tema::TINTA).bg(tema::FONDO));
-        let z = Zonas::de(area);
+        let z = Zonas::de(area, filas as u16);
         if z.carril {
-            self.carril(f, area);
+            self.carril(f, area, z.pie.y);
             self.cabecera(f, area);
         } else {
             self.cabecera_estrecha(f, area);
         }
         let s = &mut self.secciones[self.activa];
         s.pantallas[s.activa].dibujar(f, z.contenido, &self.ctx);
+        let lineas = self.lineas_pie(z.carril, ancho_pie(area.width));
         self.avisos(f, z.avisos);
-        self.pie(f, z.pie, z.carril);
+        self.pie(f, z.pie, &lineas);
         if self.ayuda {
             self.dibujar_ayuda(f);
         }
         if let Some(sel) = &mut self.elegir_pdf {
             sel.dibujar(f, f.area());
         }
+        if let Some(v) = &self.elegir_gestor {
+            v.dibujar(f, f.area());
+        }
         if !self.pantalla().capturando() {
-            self.documentos.dibujar(f, f.area(), &self.ctx);
+            // Con el carril, a su derecha (sobre el contenido): así se ve la mesa del gestor mientras se leen.
+            let zona = if z.carril { Rect { y: area.y, height: area.height, ..z.contenido } } else { area };
+            self.documentos.dibujar(f, zona, &self.ctx);
         }
         // Lo que no se ha podido leer, encima de todo.
         if let Some(v) = &self.fallos {
@@ -615,6 +677,7 @@ impl App {
         }
         // Lo que se haya quedado sin color (debajo de un `Clear`), con el fondo y la tinta de la app.
         widgets::rellenar_fondo(f.buffer_mut());
+        (lineas.len() != filas).then_some(lineas.len())
     }
 
     /// Los PDF de Hacienda de un año: si hay uno, lo abre; si hay varios, deja elegir.
@@ -707,10 +770,12 @@ impl App {
         ]
     }
 
-    /// El carril de la izquierda (columnas 0 a `CONTENIDO` - 1): el nombre en las filas 1 y 2 y, desde la fila
-    /// `FILA_CONTENIDO`, una fila sí y otra no, las secciones que te tocan. La tuya, con su letra en negrita sobre su
-    /// color y el nombre en su color; las demás, con la letra en su color y el nombre en gris.
-    fn carril(&self, f: &mut Frame, area: Rect) {
+    /// El carril de la izquierda (columnas 0 a `CONTENIDO` - 3; las dos últimas, de aire): el nombre en las filas 1
+    /// y 2 y, desde la fila `FILA_CONTENIDO`, una fila sí y otra no, las secciones que te tocan. La tuya, con su
+    /// letra en negrita sobre su color y el nombre en su color; las demás, con la letra en su color y el nombre en
+    /// gris. Debajo, tras una fila de aire, tu gestor con su mesa, hasta la fila de los avisos (incluida; la de la
+    /// barra de abajo es `pie`; ver `gestor::dibujar_bloque`: si no cabe, sin el dibujo, o nada).
+    fn carril(&self, f: &mut Frame, area: Rect, pie: u16) {
         let (a, b) = menu::NOMBRE_COLOR;
         for (k, fila) in menu::NOMBRE.iter().enumerate() {
             let c: Vec<char> = fila.chars().collect();
@@ -721,13 +786,16 @@ impl App {
         }
         let vis = self.visibles();
         // Hasta la fila de los avisos; si no caben con una fila de aire entre ellas, seguidas.
-        let tope = area.height.saturating_sub(2);
+        let tope = pie.saturating_sub(area.y);
         let paso = if FILA_CONTENIDO + 2 * vis.len() as u16 <= tope + 1 { 2 } else { 1 };
+        // La fila siguiente a la última sección.
+        let mut debajo = FILA_CONTENIDO;
         for (k, &i) in vis.iter().enumerate() {
             let y = FILA_CONTENIDO + k as u16 * paso;
             if y >= tope {
                 break;
             }
+            debajo = y + 1;
             let s = &self.secciones[i];
             let color = tema::seccion(s.tecla);
             let letra = format!(" {} ", s.tecla);
@@ -738,6 +806,10 @@ impl App {
             };
             f.render_widget(Paragraph::new(l), Rect::new(area.x + 2, area.y + y, CONTENIDO - 3, 1).intersection(area));
         }
+        let desde = debajo + 1;
+        let zona = Rect::new(area.x + menu::NOMBRE_X, area.y + desde, gestor::ANCHO, tope.saturating_sub(desde)).intersection(area);
+        let g = &gestor::GESTORES[gestor::elegido(&self.ctx.datos)];
+        gestor::dibujar_bloque(f, zona, g, &self.documentos.mesa(Instant::now()));
     }
 
     /// La cabecera, con el carril. En la fila 1, desde la columna del contenido, las pestañas y el año; a la derecha,
@@ -845,25 +917,37 @@ impl App {
         f.render_widget(Paragraph::new(l), area);
     }
 
-    /// La barra de abajo. A la izquierda, las teclas de la pantalla (y «- + año» si la pantalla usa el año) y, antes,
-    /// cómo se navega («r e a p u sección   1 2 3 pestaña»; solo con el carril: sin él se ve arriba); a la derecha,
-    /// siempre, «S traer lo último     ? ayuda   q salir». Las de la pantalla van antes que lo demás: si no cabe, se
-    /// quitan primero las palabras «sección» y «pestaña», luego lo de navegar, luego «S traer lo último» se queda en
-    /// «S traer» y solo entonces se quitan teclas de la pantalla, de la última a la primera. «? ayuda» y «q salir»,
-    /// siempre. Escribiendo, solo las de la pantalla (las demás no llegan a la app), enteras: ver `teclas_apretadas`.
-    fn pie(&self, f: &mut Frame, area: Rect, carril: bool) {
+    /// La barra de abajo, ya dibujada su fila (o sus dos filas): ver `lineas_pie`.
+    fn pie(&self, f: &mut Frame, area: Rect, lineas: &[(Line<'static>, Line<'static>)]) {
         // Una barra con su propio fondo y aire dentro, a cada lado: dos columnas (una en terminal estrecho).
         f.buffer_mut().set_style(area, Style::new().bg(tema::BARRA));
-        let dentro = if carril { 2 } else { 1 };
+        let dentro = dentro_pie(f.area().width);
         let area = Rect { x: area.x + dentro.min(area.width), width: area.width.saturating_sub(2 * dentro), ..area };
+        for (k, (izquierda, derecha)) in lineas.iter().enumerate() {
+            let r = Rect { y: area.y + k as u16, height: 1, ..area }.intersection(area);
+            f.render_widget(Paragraph::new(izquierda.clone()), r);
+            f.render_widget(Paragraph::new(derecha.clone().right_aligned()), r);
+        }
+    }
+
+    /// Lo que dice la barra de abajo, en `ancho` columnas: una fila (o dos), cada una con lo de la izquierda y lo de
+    /// la derecha. A la izquierda, cómo se navega («r e a p u sección   1 2 3 pestaña»; solo con el carril: sin él
+    /// se ve arriba) y las teclas de la pantalla (y «- + año» si la pantalla usa el año); a la derecha, «G cambiar
+    /// gestor   S traer lo último     ? ayuda   q salir» (la G, solo con el carril, donde está el gestor).
+    ///
+    /// Si no cabe, se quitan primero las palabras «sección» y «pestaña», luego lo de navegar (ya está en el menú), la
+    /// G se queda en «G gestor» y «S traer lo último» en «S traer». Si aun así no cabe, en dos filas, en columnas
+    /// alineadas (ver `rejilla`), otra vez entero y recortado igual si no cabe; si tampoco, en tres; y si tampoco, de
+    /// corrido en dos (la única manera en que se puede quitar la G). Las teclas de la pantalla no se quitan nunca (salvo que tampoco
+    /// quepan en dos filas); «? ayuda» y «q salir», tampoco. Escribiendo, solo las de la pantalla (las demás no llegan
+    /// a la app), en una fila: ver `teclas_apretadas`.
+    fn lineas_pie(&self, carril: bool, ancho: usize) -> Vec<(Line<'static>, Line<'static>)> {
         let p = self.pantalla();
         let mut propias = p.atajos();
         // La S va siempre a la derecha.
         propias.retain(|(k, _)| *k != "S");
-        let ancho = area.width as usize;
         if p.capturando() {
-            f.render_widget(Paragraph::new(teclas_apretadas(&propias, ancho)), area);
-            return;
+            return vec![(teclas_apretadas(&propias, ancho), Line::default())];
         }
         if p.usa_anio() {
             propias.push(("- +", "año"));
@@ -872,60 +956,136 @@ impl App {
         let gris = tema::apagado();
         let letras: Vec<char> = self.visibles().iter().map(|&i| self.secciones[i].tecla).collect();
         let pestanas = self.secciones[self.activa].pantallas.len();
-        // Lo de navegar: 0, entero; 1, sin las palabras («r e a p u   1 2 3»); 2, nada.
-        let nav = |nivel: u8| {
-            let mut v: Vec<Span<'static>> = Vec::new();
+        // Lo de navegar, en dos trozos (las secciones y las pestañas): 0, entero; 1, sin las palabras («r e a p u» y
+        // «1 2 3»); 2, nada.
+        let nav_trozos = |nivel: u8| {
+            let (mut secciones, mut numeros): (Vec<Span<'static>>, Vec<Span<'static>>) = (Vec::new(), Vec::new());
             if nivel >= 2 {
-                return v;
+                return [secciones, numeros];
             }
             for (k, t) in letras.iter().enumerate() {
                 if k > 0 {
-                    v.push(Span::raw(" "));
+                    secciones.push(Span::raw(" "));
                 }
-                v.push(Span::styled(t.to_string(), negrita.fg(tema::seccion(*t))));
+                secciones.push(Span::styled(t.to_string(), negrita.fg(tema::seccion(*t))));
             }
             if nivel == 0 {
-                v.push(Span::styled(" sección", gris));
+                secciones.push(Span::styled(" sección", gris));
             }
             if pestanas > 1 {
-                let numeros: Vec<String> = (1..=pestanas).map(|i| i.to_string()).collect();
-                v.extend([Span::raw("   "), Span::styled(numeros.join(" "), negrita)]);
+                let n: Vec<String> = (1..=pestanas).map(|i| i.to_string()).collect();
+                numeros.push(Span::styled(n.join(" "), negrita));
                 if nivel == 0 {
-                    v.push(Span::styled(" pestaña", gris));
+                    numeros.push(Span::styled(" pestaña", gris));
                 }
+            }
+            [secciones, numeros]
+        };
+        // En una fila: «r e a p u sección   1 2 3 pestaña».
+        let nav = |nivel: u8| {
+            let [mut v, numeros] = nav_trozos(nivel);
+            if !numeros.is_empty() {
+                v.push(Span::raw("   "));
+                v.extend(numeros);
             }
             v
         };
-        let fijas = |s_corta: bool| {
-            let mut v = widgets::atajo("S", if s_corta { "traer" } else { "traer lo último" }).to_vec();
+        // Lo de la derecha; `g`: 0, «G cambiar gestor»; 1, «G gestor»; 2, nada (sin carril no hay gestor a la vista).
+        let fijas = |g: u8, s_corta: bool| {
+            let mut v = Vec::new();
+            if g < 2 {
+                v.extend(widgets::atajo(&gestor::TECLA.to_string(), if g == 0 { "cambiar gestor" } else { "gestor" }));
+                v.push(Span::raw("   "));
+            }
+            v.extend(widgets::atajo("S", if s_corta { "traer" } else { "traer lo último" }));
             v.push(Span::raw("     "));
             v.extend(widgets::linea_atajos(&[("?", "ayuda"), ("q", "salir")]).spans);
             Line::from(v)
         };
-        // Lo de la izquierda: lo de navegar, cinco espacios y las teclas de la pantalla.
-        let izquierda = |nav: Vec<Span<'static>>, propias: &[(&str, &str)]| {
-            let mut v = nav;
-            if !propias.is_empty() {
+        // Lo de la izquierda: unas cosas detrás de otras, a cinco espacios.
+        let juntas = |trozos: Vec<Vec<Span<'static>>>| {
+            let mut v: Vec<Span<'static>> = Vec::new();
+            for t in trozos.into_iter().filter(|t| !t.is_empty()) {
                 if !v.is_empty() {
                     v.push(Span::raw("     "));
                 }
-                v.extend(widgets::linea_atajos(propias).spans);
+                v.extend(t);
             }
             Line::from(v)
         };
-        let (mut nivel, mut s_corta) = (if carril { 0 } else { 2 }, false);
+        let teclas = |v: &[(&str, &str)]| widgets::linea_atajos(v).spans;
+        // Lo que se recorta, en orden; `None`, si ya no hay nada más que recortar.
+        // (La G, solo si no queda otra: en la última manera de ponerlo, la de corrido.)
+        let recortar = |(nivel, g, s_corta): (u8, u8, bool), quitar_g: bool| match () {
+            _ if nivel < 2 => Some((nivel + 1, g, s_corta)),
+            _ if g == 0 => Some((nivel, 1, s_corta)),
+            _ if !s_corta => Some((nivel, g, true)),
+            _ if g == 1 && quitar_g => Some((nivel, 2, s_corta)),
+            _ => None,
+        };
+        let entero = if carril { (0, 0, false) } else { (2, 2, false) };
         // Entre lo de la izquierda y lo de la derecha, al menos cinco espacios.
-        while izquierda(nav(nivel), &propias).width() + 5 + fijas(s_corta).width() > ancho {
-            if nivel < 2 {
-                nivel += 1;
-            } else if !s_corta {
-                s_corta = true;
-            } else if propias.pop().is_none() {
-                break;
+        let cabe = |izquierda: &Line, (_, g, s_corta): (u8, u8, bool)| izquierda.width() + 5 + fijas(g, s_corta).width() <= ancho;
+        // En una fila.
+        let mut r = Some(entero);
+        while let Some(c) = r {
+            let izquierda = juntas(vec![nav(c.0), teclas(&propias)]);
+            if cabe(&izquierda, c) {
+                return vec![(izquierda, fijas(c.1, c.2))];
+            }
+            r = recortar(c, false);
+        }
+        // En dos filas (y, si no, en tres), en columnas: lo de navegar (las secciones encima de las pestañas) y las
+        // teclas de la pantalla, en orden, de arriba abajo; a la derecha, lo de siempre («G» encima de «S», «?» encima
+        // de «q»). Si no cabe, se recorta lo mismo y, al final, las columnas van a dos espacios.
+        let celda = |(k, d): &(&str, &str)| widgets::atajo(k, d).to_vec();
+        let derecha = |g: u8, s_corta: bool| {
+            let s = widgets::atajo("S", if s_corta { "traer" } else { "traer lo último" }).to_vec();
+            let primera = match g {
+                2 => vec![s],
+                _ => vec![widgets::atajo(&gestor::TECLA.to_string(), if g == 0 { "cambiar gestor" } else { "gestor" }).to_vec(), s],
+            };
+            vec![primera, vec![widgets::atajo("?", "ayuda").to_vec(), widgets::atajo("q", "salir").to_vec()]]
+        };
+        for filas in [2, 3] {
+            let (mut c, mut hueco) = (entero, 3);
+            loop {
+                let [secciones, numeros] = nav_trozos(c.0);
+                let mut columnas = if secciones.is_empty() { Vec::new() } else { vec![vec![secciones, numeros]] };
+                columnas.extend(propias.chunks(filas).map(|c| c.iter().map(celda).collect()));
+                let izquierda = rejilla(&columnas, filas, hueco);
+                let la_derecha = rejilla(&derecha(c.1, c.2), filas, hueco);
+                if izquierda[0].width() + 5 + la_derecha[0].width() <= ancho {
+                    return izquierda.into_iter().zip(la_derecha).collect();
+                }
+                match recortar(c, false) {
+                    Some(otro) => c = otro,
+                    None if hueco > 2 => hueco = 2,
+                    None => break,
+                }
             }
         }
-        f.render_widget(Paragraph::new(izquierda(nav(nivel), &propias)), area);
-        f.render_widget(Paragraph::new(fijas(s_corta).right_aligned()), area);
+        // Y si tampoco, de corrido: arriba, las de la pantalla que quepan; abajo, las que no, lo de navegar y lo de la
+        // derecha.
+        let mut arriba = propias;
+        let mut abajo = Vec::new();
+        while arriba.len() > 1 && widgets::linea_atajos(&arriba).width() > ancho {
+            abajo.insert(0, arriba.pop().unwrap_or_default());
+        }
+        // Con teclas de la pantalla abajo, sin lo de navegar (ya está en el menú).
+        let mut c = if abajo.is_empty() { entero } else { (2, entero.1, entero.2) };
+        loop {
+            let izquierda = juntas(vec![teclas(&abajo), nav(c.0)]);
+            if cabe(&izquierda, c) {
+                break;
+            }
+            match recortar(c, true) {
+                Some(otro) => c = otro,
+                None if abajo.pop().is_some() => {}
+                None => break,
+            }
+        }
+        vec![(widgets::linea_atajos(&arriba), Line::default()), (juntas(vec![teclas(&abajo), nav(c.0)]), fijas(c.1, c.2))]
     }
 
     /// La ayuda (`?`), en una ventana encima: las teclas de la app, en negrita, y lo que hacen, en gris; abajo, la
@@ -951,10 +1111,12 @@ impl App {
             ("S".into(), "traer lo último de Hacienda y la Seguridad Social".into()),
             ("arrastrar".into(), "un PDF o una foto: Claude dice si es nómina, gasto o ingreso".into()),
             ("  Espacio · o".into(), "saltar en el juego · abrir el original al revisarlos".into()),
+            (gestor::TECLA.to_string(), "cambiar de gestor (el de debajo del menú, con su mesa)".into()),
             ("!".into(), "lo que no se ha podido leer o traer: verlo entero y copiarlo".into()),
             ("q".into(), "salir".into()),
         ];
-        let mut t = vec![Line::from("")];
+        // Una fila de aire arriba, salvo en un terminal bajo (ahí no cabe todo).
+        let mut t = if f.area().height < 25 { Vec::new() } else { vec![Line::from("")] };
         t.extend(teclas.into_iter().map(|(k, d): (String, String)| Line::from(vec![Span::styled(format!("{k:<18}"), negrita), Span::styled(d, gris)])));
         t.extend([
             Line::from(""),
@@ -999,6 +1161,26 @@ fn teclas_apretadas(atajos: &[(&str, &str)], ancho: usize) -> Line<'static> {
         }
     }
     linea(&v, hueco)
+}
+
+/// Columnas de celdas (de arriba abajo; las que falten, vacías) en `n` filas, cada columna tan ancha como su celda
+/// más ancha y a `hueco` espacios de la siguiente: las filas, igual de anchas (para que, alineadas a la derecha,
+/// también cuadren).
+fn rejilla(columnas: &[Vec<Vec<Span<'static>>>], n: usize, hueco: usize) -> Vec<Line<'static>> {
+    let ancho = |v: &[Span]| v.iter().map(|s| s.width()).sum::<usize>();
+    let mut filas: Vec<Vec<Span<'static>>> = vec![Vec::new(); n];
+    for (j, col) in columnas.iter().enumerate() {
+        let w = col.iter().map(|c| ancho(c)).max().unwrap_or(0);
+        for (k, fila) in filas.iter_mut().enumerate() {
+            let celda = col.get(k).map(Vec::as_slice).unwrap_or_default();
+            if j > 0 {
+                fila.push(Span::raw(" ".repeat(hueco)));
+            }
+            fila.extend(celda.iter().cloned());
+            fila.push(Span::raw(" ".repeat(w - ancho(celda))));
+        }
+    }
+    filas.into_iter().map(Line::from).collect()
 }
 
 /// `s` en `n` columnas como mucho, con «…» si se corta.
@@ -1066,7 +1248,7 @@ pub fn ejecutar(mut terminal: DefaultTerminal, mut app: App) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::prueba::{app, app_con, cargar, caso, ir, pantalla, teclas, titulos};
-    use super::{menu, App};
+    use super::{gestor, menu, App};
     use crate::dominio::fmt::{self, anio_actual};
     use crate::dominio::{Cliente, Datos, Factura, Linea, Nomina, Num, PRIMER_ANIO};
 
@@ -1105,6 +1287,7 @@ mod tests {
             ("2", "Años"),
             ("3", "Declaraciones"),
             ("u", "Calcula tu sueldo"),
+            ("2", "Calcula como autónomo"),
             ("1", "Calcula tu sueldo"),
             ("a", "Impuestos"),
             ("1", "Facturas"),
@@ -1121,8 +1304,9 @@ mod tests {
         assert!(p.contains(" r   Resumen") && p.contains(" e   Empleo") && p.contains(" a   Autónomo") && p.contains(" u   Utilidades"), "{p}");
         assert!(filas[1].contains("1 Sueldo     2 Nóminas") && !filas[1].contains("Facturas"), "{p}");
         assert_eq!(filas[2].chars().position(|c| c == '▀'), Some(super::CONTENIDO as usize + "1 Sueldo     ".len()), "{p}");
-        // Y abajo, cómo se navega (sin las palabras si no caben con las teclas de la pantalla).
-        assert!(filas[34].starts_with("    r e a p u ") && filas[34].contains("1 2"), "{p}");
+        // Y abajo, cómo se navega, solo si cabe con las teclas de la pantalla (en Nóminas no: las letras ya están en
+        // el menú; ver `el_pie_da_prioridad_a_las_teclas_de_la_pantalla`).
+        assert!(filas[34].starts_with("    n nueva") && !filas[34].contains("r e a p u"), "{p}");
         // Con la terminal estrecha, arriba: el nombre y las letras de las secciones (la tuya, con su nombre) y,
         // debajo, las pestañas de la tuya.
         let p = pantalla(&mut a, 80, 24);
@@ -1157,7 +1341,7 @@ mod tests {
     #[test]
     fn sin_agujeros_en_el_fondo() {
         use ratatui::style::Color;
-        for (t, k) in [("Inicio", ""), ("Inicio", "?"), ("Inicio", "!"), ("Declaraciones", "o"), ("Facturas", "n"), ("Facturas", "n<esc>"), ("Facturas", "c"), ("Gastos", "n")] {
+        for (t, k) in [("Inicio", ""), ("Inicio", "?"), ("Inicio", "!"), ("Inicio", "G"), ("Inicio", "G<right>"), ("Declaraciones", "o"), ("Facturas", "n"), ("Facturas", "n<esc>"), ("Facturas", "c"), ("Gastos", "n")] {
             for (w, h) in [(120, 36), (80, 24)] {
                 let mut a = con_empleo();
                 ir(&mut a, t);
@@ -1171,28 +1355,84 @@ mod tests {
         }
     }
 
+    /// En la barra de abajo están siempre todas las teclas de la pantalla (si no caben en una fila, en dos), en todas
+    /// las pantallas, en lo que se ve al entrar y al abrir lo primero, de 80 a 140 columnas.
+    #[test]
+    fn el_pie_no_se_deja_teclas() {
+        let mut a = con_empleo();
+        for t in titulos(&a) {
+            for paso in ["", "<down><enter>"] {
+                for (w, h) in [(80, 24), (100, 30), (120, 36), (140, 40)] {
+                    ir(&mut a, t);
+                    teclas(&mut a, paso);
+                    let p = pantalla(&mut a, w, h);
+                    let pie: String = p.lines().skip(h as usize - 4).collect::<Vec<_>>().join(" ");
+                    if a.pantalla().capturando() {
+                        teclas(&mut a, "<esc><esc>");
+                        continue;
+                    }
+                    let mut propias = a.pantalla().atajos();
+                    if a.pantalla().usa_anio() {
+                        propias.push(("- +", "año"));
+                    }
+                    for (k, d) in propias.into_iter().filter(|(k, _)| *k != "S") {
+                        assert!(pie.contains(&format!("{k} {d}")), "{t} «{paso}» {w}x{h}: falta «{k} {d}»\n{p}");
+                    }
+                    assert!(pie.contains("? ayuda") && pie.contains("q salir"), "{t} {w}x{h}");
+                    teclas(&mut a, "<esc><esc>");
+                }
+            }
+        }
+    }
+
     /// En la barra de abajo, las teclas de la pantalla van antes: si no cabe todo, se quitan primero las palabras de
-    /// navegar, luego lo de navegar entero, luego «S traer lo último» se queda en «S traer» y solo entonces se van
-    /// las teclas del final. «? ayuda» y «q salir», siempre. Escribiendo, enteras aunque sea recortando lo que dicen.
+    /// navegar, luego lo de navegar entero, «G cambiar gestor» se queda en «G gestor» y «S traer lo último» en «S
+    /// traer»; si aun así no caben, dos filas (o tres), en columnas alineadas. «? ayuda» y «q salir», siempre; la G,
+    /// con carril (sin él no hay gestor a la vista). Escribiendo, en una fila, enteras aunque sea recortando lo que
+    /// dicen.
     #[test]
     fn el_pie_da_prioridad_a_las_teclas_de_la_pantalla() {
-        let pie = |a: &mut App, w: u16, h: u16| pantalla(a, w, h).lines().nth(h as usize - 2).unwrap().to_string();
+        let fila = |a: &mut App, w: u16, h: u16, k: usize| pantalla(a, w, h).lines().nth(h as usize - k).unwrap().trim_end().to_string();
+        let pie = |a: &mut App, w: u16, h: u16| fila(a, w, h, 2);
         let mut a = app();
-        // Con sitio de sobra (Inicio tiene una sola tecla), todo entero.
+        // Con sitio de sobra (Inicio tiene una sola tecla), todo entero, en una fila.
         let p = pie(&mut a, 120, 36);
-        assert_eq!(p, format!("    r a p u sección   1 2 3 pestaña     Tab más{}S traer lo último     ? ayuda   q salir", " ".repeat(30)));
-        // En Facturas, sin lo de navegar, con «S traer» y las teclas que caben, de la primera en adelante.
+        assert_eq!(p, format!("    r a p u sección   1 2 3 pestaña     Tab más{}G cambiar gestor   S traer lo último     ? ayuda   q salir", " ".repeat(11)));
+        assert!(fila(&mut a, 120, 36, 3).trim().is_empty());
+        // Más estrecho, sin las palabras de navegar.
+        let p = pie(&mut a, 100, 30);
+        assert!(p.starts_with("    r a p u   1 2 3     Tab más") && p.ends_with("G cambiar gestor   S traer lo último     ? ayuda   q salir"), "{p}");
+        // Sin carril, sin la G.
+        assert!(pie(&mut a, 80, 24).ends_with("    S traer lo último     ? ayuda   q salir"));
+        // En Facturas no caben en una: en dos, en columnas, con lo de navegar delante y lo de siempre a la derecha.
         ir(&mut a, "Facturas");
-        let p = pie(&mut a, 120, 36);
-        assert!(p.starts_with("    n nueva   Enter ver   c cobrada   f filtro   / buscar   C clientes   "), "{p}");
-        assert!(p.ends_with("S traer     ? ayuda   q salir") && !p.contains("sección") && !p.contains("r a p u"), "{p}");
-        let p = pie(&mut a, 80, 24);
-        assert!(p.starts_with("  n nueva   Enter ver   c cobrada") && p.ends_with("S traer     ? ayuda   q salir"), "{p}");
-        // Si lo de navegar entero no cabe con las teclas de la pantalla (Nóminas), sin las palabras.
+        assert_eq!(
+            [fila(&mut a, 120, 36, 3), pie(&mut a, 120, 36)],
+            [
+                "    r a p u sección   n nueva     c cobrada       f filtro   C clientes   o doc          G cambiar gestor    ? ayuda",
+                "    1 2 3 pestaña     Enter ver   ← → trimestre   / buscar   D duplicar   - + año        S traer lo último   q salir",
+            ]
+        );
+        // A 80 columnas, sin lo de navegar, con «S traer» y a dos espacios.
+        assert_eq!(
+            [fila(&mut a, 80, 24, 3), pie(&mut a, 80, 24)],
+            ["  n nueva    c cobrada      f filtro  C clientes  o doc       S traer  ? ayuda", "  Enter ver  ← → trimestre  / buscar  D duplicar  - + año              q salir"]
+        );
+        // Gastos, a 80 columnas, no cabe en dos: en tres.
+        ir(&mut a, "Gastos");
+        let p = pantalla(&mut a, 80, 24);
+        let filas: Vec<&str> = p.lines().skip(20).take(3).map(str::trim_end).collect();
+        assert_eq!(filas[0], "  n nuevo         c categoría   D duplicar         S traer lo último   ? ayuda", "{p}");
+        assert_eq!(filas[1], "  Enter ficha     / buscar      d borrar                               q salir", "{p}");
+        assert_eq!(filas[2], "  ← → trimestre   o documento   - + año", "{p}");
+        // Lo de navegar se va antes que lo de la G (Impuestos); y la G se queda en «G gestor» antes que la S (Nóminas,
+        // a 100 columnas).
         let mut a = con_empleo();
-        teclas(&mut a, "e2");
+        teclas(&mut a, "a3");
         let p = pie(&mut a, 120, 36);
-        assert!(p.starts_with("    r e a p u   1 2     n nueva") && p.ends_with("S traer lo último     ? ayuda   q salir"), "{p}");
+        assert!(p.starts_with("    ← → trimestres") && p.ends_with("G cambiar gestor   S traer lo último     ? ayuda   q salir"), "{p}");
+        let p = pie(&mut a, 100, 30);
+        assert!(p.starts_with("    ← → trimestres") && p.ends_with("    G gestor   S traer lo último     ? ayuda   q salir"), "{p}");
         // Escribiendo (el editor de una factura), a 80 columnas: todas las teclas, con lo que dicen recortado.
         ir(&mut a, "Facturas");
         teclas(&mut a, "n<esc>");
@@ -1206,6 +1446,98 @@ mod tests {
         assert_eq!(apretadas(&[("a", "uno dos"), ("b", "tres")], 8), "a uno");
     }
 
+    /// Debajo del menú, tu gestor: su nombre, su dibujo y su mesa («⇣ arrastra aquí» y qué se puede soltar), con
+    /// todas las secciones a 120 × 36 y una fila de aire encima de la barra de abajo; la tecla para cambiarlo, en la
+    /// barra, con las demás.
+    /// Entre el carril y el contenido, dos columnas de aire. Si no cabe, sin el dibujo; si tampoco, nada; sin carril,
+    /// nada.
+    #[test]
+    fn el_gestor_cabe_en_el_carril() {
+        use ratatui::style::Color;
+        let mut a = con_empleo();
+        let (w, h) = (120, 36);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|f| a.dibujar(f)).unwrap();
+        let b = term.backend().buffer().clone();
+        let p = pantalla(&mut a, w, h);
+        let filas: Vec<&str> = p.lines().collect();
+        // Las cinco secciones (de la 4 a la 12), aire, el nombre (14), el dibujo (15 a 27), el tablero (28), el
+        // faldón (29 a 31) y las patas (32); la 33 (la de los avisos, libre en el carril), de aire.
+        let carril = |k: usize| filas[k].chars().take(super::CONTENIDO as usize).collect::<String>();
+        assert!(carril(12).contains("u   Utilidades") && carril(13).trim().is_empty(), "{p}");
+        assert!(filas[14].starts_with("  Mari Carmen"), "{p}");
+        let fin = 14 + gestor::ALTO_BLOQUE as usize - 1;
+        assert_eq!(fin, h as usize - 4, "con una fila de aire encima de la barra de abajo");
+        for (k, t) in [(29, "⇣ arrastra aquí"), (30, "facturas, gastos y"), (31, "nóminas (PDF, foto)")] {
+            assert!(carril(k).contains(t), "fila {k}: {p}");
+        }
+        assert!(carril(fin).trim().is_empty(), "las patas, solas: {p}");
+        assert!(filas[h as usize - 2].contains("G cambiar gestor"), "{p}");
+        // El dibujo: de la columna 2 a la 21, en color; nada del carril en las columnas 22 y 23, ni del contenido.
+        let pintadas = (15..28).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| b[(x, y)].symbol() == "▀" && x < super::CONTENIDO);
+        assert!(pintadas.clone().all(|(x, _)| (2..22).contains(&x)), "el dibujo, de la 2 a la 21");
+        assert!(pintadas.count() > 100, "el dibujo se ve");
+        for y in 0..h - 2 {
+            for x in super::CONTENIDO - 2..super::CONTENIDO {
+                let c = &b[(x, y)];
+                assert!(c.symbol() == " " && c.bg == super::tema::FONDO && c.bg != Color::Reset, "aire en ({x}, {y}): {p}");
+            }
+        }
+        // Más bajo: sin el dibujo, con la mesa; más aún, nada. Sin carril, tampoco.
+        let p = pantalla(&mut a, 120, 28);
+        assert!(p.contains("Mari Carmen") && p.contains("⇣ arrastra aquí") && p.contains("G cambiar gestor"), "{p}");
+        let con_medios = p.lines().skip(3).filter(|l| l.chars().take(super::CONTENIDO as usize).any(|c| c == '▀')).count();
+        assert_eq!(con_medios, 1, "sin el dibujo, solo el tablero:\n{p}");
+        let filas: Vec<String> = p.lines().map(|l| l.chars().take(super::CONTENIDO as usize).collect()).collect();
+        let nombre = filas.iter().position(|l| l.contains("Mari Carmen")).unwrap();
+        assert!(filas[nombre + 2].contains("arrastra aquí"), "el tablero justo debajo del nombre: {p}");
+        assert!(!pantalla(&mut a, 120, 20).contains("arrastra aquí"));
+        assert!(!pantalla(&mut a, 80, 24).contains("arrastra aquí"));
+    }
+
+    /// `G` abre la ventana para elegir gestor (con los cuatro, el tuyo resaltado y lo suyo debajo): ← → cambia de
+    /// uno a otro, Enter lo contrata (se guarda en tus datos y sale en el carril) y Esc lo deja como estaba. Sin
+    /// carril, sin dibujos. Escribiendo, la G se escribe.
+    #[test]
+    fn la_g_elige_gestor() {
+        let mut a = app();
+        assert_eq!(a.ctx.datos.gestor, "", "de entrada, el de siempre");
+        teclas(&mut a, "G");
+        let p = pantalla(&mut a, 120, 36);
+        for t in ["Elige a tu gestor", "Don Antonio", "Mari Carmen", "Hermanos Martínez", "Doña Remedios", "la de las dos", "★ Sprint de las 13:30", "✗ Persiana a las dos", "Puntualidad", "para irse", "← → elegir", "Enter contratar", "Esc cancelar"] {
+            assert!(p.contains(t), "«{t}»: {p}");
+        }
+        teclas(&mut a, "<right>");
+        let p = pantalla(&mut a, 120, 36);
+        assert!(p.contains("eso lo lleva mi hermano") && p.contains("—¡Que no, que lo llevas tú!") && !p.contains("la de las dos"), "{p}");
+        // Sin carril, solo los nombres; y lo de Doña Remedios, que se pasa de la barra.
+        teclas(&mut a, "<right>");
+        let p = pantalla(&mut a, 80, 24);
+        assert!(p.contains("Doña Remedios") && p.contains("no cabe en la barra") && p.contains("12"), "{p}");
+        teclas(&mut a, "<left><enter>");
+        assert_eq!(a.ctx.datos.gestor, "hermanos-martinez");
+        assert!(aviso(&a).contains("Hermanos Martínez"), "{}", aviso(&a));
+        let p = pantalla(&mut a, 120, 36);
+        assert!(!p.contains("Elige a tu gestor") && p.lines().nth(12).unwrap().starts_with("  Hermanos Martínez"), "{p}");
+        // Esc: se queda el que había.
+        teclas(&mut a, "G<right><right><esc>");
+        assert_eq!(a.ctx.datos.gestor, "hermanos-martinez");
+        assert!(!pantalla(&mut a, 120, 36).contains("Elige a tu gestor"));
+        // Escribiendo (buscar en Facturas), la G es una letra más.
+        ir(&mut a, "Facturas");
+        teclas(&mut a, "/G");
+        assert!(a.pantalla().capturando() && !pantalla(&mut a, 120, 36).contains("Elige a tu gestor"));
+        // En cualquier tamaño, sin romperse (la ventana y el carril).
+        teclas(&mut a, "<esc><esc>G");
+        for (w, h) in [(20, 5), (30, 8), (40, 13), (60, 12), (100, 30), (100, 20), (200, 60)] {
+            pantalla(&mut a, w, h);
+        }
+        // Y está en la ayuda.
+        teclas(&mut a, "<esc>?");
+        assert!(pantalla(&mut a, 120, 36).lines().any(|l| l.contains("G ") && l.contains("cambiar de gestor")));
+        assert!(pantalla(&mut a, 80, 24).contains("cambiar de gestor"));
+    }
+
     /// La letra de una sección que no te toca no la abre: se dice. Un número sin pestaña no hace nada.
     #[test]
     fn una_seccion_que_no_sale() {
@@ -1213,7 +1545,7 @@ mod tests {
         teclas(&mut a, "a2e");
         assert_eq!(a.titulo_activa(), "Gastos");
         assert!(aviso(&a).contains("Empleo"), "{}", aviso(&a));
-        teclas(&mut a, "u2");
+        teclas(&mut a, "u3");
         assert_eq!(a.titulo_activa(), "Calcula tu sueldo");
     }
 
@@ -1266,6 +1598,7 @@ mod tests {
             ("Sueldo", "n"),
             ("Nóminas", "n"),
             ("Calcula tu sueldo", "<enter>"),
+            ("Calcula como autónomo", "<enter>"),
         ];
         for (titulo, abrir) in casos {
             let mut a = con_empleo();
@@ -1279,10 +1612,10 @@ mod tests {
         }
     }
 
-    /// Ninguna pantalla anuncia abajo una tecla de navegar: no le llegaría.
+    /// Ninguna pantalla anuncia abajo una tecla de navegar ni la de elegir gestor: no le llegarían.
     #[test]
     fn ninguna_pantalla_usa_las_teclas_de_navegar() {
-        let reservada = |k: &str| k.chars().count() == 1 && k.chars().all(|c| menu::RESERVADAS.contains(c) || c.is_ascii_digit());
+        let reservada = |k: &str| k.chars().count() == 1 && k.chars().all(|c| menu::RESERVADAS.contains(c) || c.is_ascii_digit() || c == gestor::TECLA);
         for t in titulos(&con_empleo()) {
             for anio in [anio_actual(), anio_actual() - 1, PRIMER_ANIO] {
                 for paso in ["", "<enter>", "<down><enter>", "C", "/<enter>"] {

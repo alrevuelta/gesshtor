@@ -725,7 +725,7 @@ mod tests {
         ver(&p);
         let filas: Vec<&str> = p.lines().collect();
         assert!(!p.contains("Así va tu") && filas[4].contains("Ahora trabajas por tu cuenta"), "{p}");
-        assert!(filas[6].chars().skip(22).collect::<String>().starts_with("próximo plazo"), "a la izquierda:\n{p}");
+        assert!(filas[6].chars().skip(crate::tui::CONTENIDO as usize).collect::<String>().starts_with("próximo plazo"), "a la izquierda:\n{p}");
         assert!(p.contains("autónomo") && p.contains("De alta desde"), "{p}");
 
         d.perfil.fecha_alta.clear();

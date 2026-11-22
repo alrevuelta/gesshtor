@@ -76,6 +76,18 @@ pub fn pantalla(app: &mut App, w: u16, h: u16) -> String {
     s
 }
 
+/// Pinta la app en un terminal de `w` × `h` y devuelve, en JSON, cada celda con sus colores: [símbolo, tinta,
+/// fondo, modificadores]. Para pasarla a imagen y verla (ver `captura`).
+pub fn colores(app: &mut App, w: u16, h: u16) -> String {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| app.dibujar(f)).unwrap();
+    let b = t.backend().buffer();
+    let filas: Vec<Vec<serde_json::Value>> = (0..h)
+        .map(|y| (0..w).map(|x| { let c = &b[(x, y)]; serde_json::json!([c.symbol(), format!("{:?}", c.fg), format!("{:?}", c.bg), c.modifier.bits()]) }).collect())
+        .collect();
+    serde_json::to_string(&filas).unwrap()
+}
+
 /// Lo que se ve sin el carril de la izquierda (en pantallas anchas ocupa las primeras columnas).
 pub fn sin_menu(s: &str) -> String {
     s.lines().map(|l| l.chars().skip(super::CONTENIDO as usize).collect::<String>()).collect::<Vec<_>>().join("\n")
@@ -150,7 +162,7 @@ pub fn recorrer(dir: &Path) -> BTreeMap<String, String> {
                 "Años" => extra.extend([("g", "g"), ("g otra vez", "g"), ("g y otra", "g"), ("+ desde el detalle", "<enter>+"), ("- desde el detalle", "-"), ("Esc y el anterior", "<esc>-<enter>"), ("Esc tras el anterior", "<esc>")]),
                 "Impuestos" => extra.extend([("← el 4T", "<left>"), ("← el 3T", "<left>"), ("→ → al año", "<right><right>")]),
                 "Facturas" => extra.extend([("C sus clientes", "C"), ("abajo en los clientes", "<down>"), ("Esc a las facturas", "<esc>")]),
-                "Calcula tu sueldo" => extra.extend([("d el detalle", "d"), ("→ el de autónomo", "<right>"), ("d las comunidades", "d"), ("↓ otra comunidad", "<down>")]),
+                "Calcula tu sueldo" | "Calcula como autónomo" => extra.extend([("d el detalle", "d"), ("d las comunidades", "d"), ("→ otra comunidad", "<end><right>"), ("Enter y un importe", "<home><enter><c-u>45000"), ("Enter, calculado", "<enter>")]),
                 _ => {}
             }
             for (i, (nombre, k)) in extra.iter().enumerate() {
@@ -249,13 +261,7 @@ mod tests {
         ir(&mut a, &var("PANTALLA", "Inicio"));
         teclas(&mut a, &var("TECLAS", ""));
         let (w, h): (u16, u16) = (var("W", "120").parse().unwrap(), var("H", "36").parse().unwrap());
-        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-        t.draw(|f| a.dibujar(f)).unwrap();
-        let b = t.backend().buffer();
-        let filas: Vec<Vec<serde_json::Value>> = (0..h)
-            .map(|y| (0..w).map(|x| { let c = &b[(x, y)]; serde_json::json!([c.symbol(), format!("{:?}", c.fg), format!("{:?}", c.bg), c.modifier.bits()]) }).collect())
-            .collect();
-        std::fs::write(var("SALIDA", "captura.json"), serde_json::to_string(&filas).unwrap()).unwrap();
+        std::fs::write(var("SALIDA", "captura.json"), colores(&mut a, w, h)).unwrap();
     }
 
     /// Instantáneas, para comparar antes y después de un cambio que no debería cambiar lo que se ve:

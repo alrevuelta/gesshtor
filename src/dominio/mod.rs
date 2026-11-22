@@ -63,6 +63,10 @@ pub struct Datos {
     pub nominas: Vec<Nomina>,
     /// Los conectores con brókeres que has activado (desactivados por defecto).
     pub inversiones: inversiones::Inversiones,
+    /// El gestor que has elegido (con `G`, ver `tui::gestor`): su clave («don-antonio»…). Vacío o una que no se
+    /// conoce, el de siempre: Mari Carmen. Vacío no se escribe (los datos de antes quedan igual).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub gestor: String,
     /// Lo presentado en Hacienda, por año (lo que dio la última consulta). No va en `datos.json` (sí en el de la
     /// versión 2, de donde se lee para convertirlo): está en `fuentes/aeat-AAAA-consulta.json`.
     #[serde(skip_serializing)]
@@ -128,6 +132,7 @@ impl Default for Datos {
             gastos: Vec::new(),
             nominas: Vec::new(),
             inversiones: inversiones::Inversiones::default(),
+            gestor: String::new(),
             hacienda: BTreeMap::new(),
             tgss: tgss::Tgss::default(),
             carteras: BTreeMap::new(),
