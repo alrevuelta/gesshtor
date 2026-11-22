@@ -78,9 +78,10 @@ fn solidaridad(g: &reglas::General, mensual: f64) -> (f64, f64) {
 }
 
 /// Los años que la calculadora tiene enteros (las cotizaciones de asalariados y de autónomos y el IRPF de ese mismo
-/// año), de 2025 al que viene: solo esos se pueden elegir (con las reglas de otro año, el resultado no sería el suyo).
+/// año), del primero de la app al que viene: solo esos se pueden elegir (con las reglas de otro año, el resultado no
+/// sería el suyo).
 pub fn anios_con_reglas() -> Vec<i32> {
-    (2025..=crate::dominio::fmt::anio_actual() + 1)
+    (crate::dominio::PRIMER_ANIO..=crate::dominio::fmt::anio_actual() + 1)
         .filter(|&y| reglas::general(y).anio == y && reglas::autonomos(y).anio == y && irpf::reglas(y, "").anio == y)
         .collect()
 }
@@ -115,7 +116,8 @@ pub fn asalariado(bruto: f64, temporal: bool, comunidad: &str, anio: i32) -> Asa
         Concepto::new("Formación profesional", g.formacion.1, anual),
         Concepto::new("Equidad intergeneracional (MEI)", g.mei.1, anual),
     ];
-    if mensual > g.base_maxima {
+    // La solidaridad, desde 2025 (antes, por encima de la base máxima no se cotizaba).
+    if mensual > g.base_maxima && !g.solidaridad.is_empty() {
         let sol = |mes: f64| Concepto { nombre: "Cotización de solidaridad".into(), tipo: None, importe: r2(mes * 12.0) };
         empresa.push(sol(sol_empresa));
         trabajador.push(sol(sol_trabajador));
@@ -150,13 +152,22 @@ pub struct Autonomo {
     /// Lo facturado sin IVA, y los gastos de la actividad sin la cuota.
     pub facturado: f64,
     pub gastos: f64,
-    /// Los rendimientos al mes con los que se elige el tramo (menos los gastos genéricos), el tramo y su base
-    /// mínima (al mes).
+    /// Los rendimientos al mes con los que se elige el tramo (menos los gastos genéricos), el tramo y sus bases
+    /// mínima y máxima (al mes).
     pub mensual_ss: f64,
     pub gastos_genericos: f64,
+    /// ¿Con tramos? (desde 2023; antes, la base mínima para todos y sin gastos genéricos).
+    pub con_tramos: bool,
     pub tramo: usize,
+    pub base_minima: f64,
+    pub base_maxima: f64,
+    /// La base con que cotizas (la mínima, o la de la cuota que elijas) y el tipo.
     pub base: f64,
     pub tipo: f64,
+    /// La cuota al mes, la mínima de tu tramo (sin tarifa plana) y si es la tarifa plana.
+    pub cuota_mes: f64,
+    pub cuota_minima: f64,
+    pub tarifa_plana: bool,
     /// La cuota del año, por conceptos.
     pub cuota: Vec<Concepto>,
     pub ss: f64,
@@ -179,15 +190,36 @@ impl Autonomo {
     }
 }
 
-/// Un autónomo persona física (no societario), con la base mínima de su tramo todo el año.
-pub fn autonomo(facturado: f64, gastos: f64, comunidad: &str, anio: i32) -> Autonomo {
+/// Cómo cotiza un autónomo: la base que elige (None: la mínima de su tramo; por debajo de ella, la mínima, y por
+/// encima de la máxima, la máxima; ver `reglas::Autonomos::bases`) y si tiene la tarifa plana (la de su primer año).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Cotiza {
+    pub base: Option<f64>,
+    pub tarifa_plana: bool,
+}
+
+/// Un autónomo persona física (no societario), con la misma base todo el año: la mínima de su tramo o la que elija;
+/// o, con la tarifa plana, la de su primer año.
+pub fn autonomo(facturado: f64, gastos: f64, cotiza: Cotiza, comunidad: &str, anio: i32) -> Autonomo {
     let a = reglas::autonomos(anio);
     let antes = r2(facturado - gastos);
     let mensual_ss = r2(antes.max(0.0) * (1.0 - a.gastos_genericos / 100.0) / 12.0);
-    let (tramo, base) = a.tramo(mensual_ss);
-    let cuota: Vec<Concepto> = a.desglose.iter().map(|(n, t)| Concepto::new(n, *t, base * 12.0)).collect();
+    let (tramo, base_minima, base_maxima) = a.tramo(mensual_ss);
     // La cuota, como en el recibo: la base por el tipo total, cada mes.
-    let ss = r2(r2(base * a.tipo / 100.0) * 12.0);
+    let al_mes = |base: f64| r2(base * a.tipo / 100.0);
+    // La tarifa plana, si ese año la hay.
+    let tarifa_plana = a.tarifa_plana.filter(|_| cotiza.tarifa_plana);
+    let base = match cotiza.base {
+        Some(b) if tarifa_plana.is_none() => b.clamp(base_minima, base_maxima),
+        _ => base_minima,
+    };
+    let (cuota_mes, cuota) = if let Some(t) = tarifa_plana {
+        let c = Concepto { nombre: "Tarifa plana".into(), tipo: None, importe: r2(t * 12.0) };
+        (t, vec![c])
+    } else {
+        (al_mes(base), a.desglose.iter().map(|(n, t)| Concepto::new(n, *t, base * 12.0)).collect())
+    };
+    let ss = r2(cuota_mes * 12.0);
     let r = irpf::reglas(anio, comunidad);
     let rendimiento = r2(antes - ss);
     let (gdj, reduccion, _, cuota_irpf) = irpf::cuota_actividad(&r, rendimiento);
@@ -199,9 +231,15 @@ pub fn autonomo(facturado: f64, gastos: f64, comunidad: &str, anio: i32) -> Auto
         gastos,
         mensual_ss,
         gastos_genericos: a.gastos_genericos,
+        con_tramos: a.tramos.len() > 1,
         tramo,
+        base_minima,
+        base_maxima,
         base,
         tipo: a.tipo,
+        cuota_mes,
+        cuota_minima: al_mes(base_minima),
+        tarifa_plana: tarifa_plana.is_some(),
         cuota,
         ss,
         rendimiento,
@@ -246,9 +284,9 @@ pub fn asalariado_por_comunidad(bruto: f64, temporal: bool, anio: i32) -> Vec<En
 }
 
 /// Un autónomo en cada comunidad (ver `autonomo`).
-pub fn autonomo_por_comunidad(facturado: f64, gastos: f64, anio: i32) -> Vec<EnComunidad> {
+pub fn autonomo_por_comunidad(facturado: f64, gastos: f64, cotiza: Cotiza, anio: i32) -> Vec<EnComunidad> {
     por_comunidad(anio, |c| {
-        let a = autonomo(facturado, gastos, c, anio);
+        let a = autonomo(facturado, gastos, cotiza, c, anio);
         (a.irpf.total, a.neto)
     })
 }
@@ -301,9 +339,11 @@ mod tests {
         }
         // Las demás, sobre la base máxima: 5.101,20 × 12 × 4,70 % = 2.877,08 €.
         assert_eq!(s.trabajador[0].importe, 2877.08);
-        // En 2025 no hay solidaridad por debajo de su base máxima, y la de 2024 no la tiene la app: usa la de 2025.
+        // En 2025 no hay solidaridad por debajo de su base máxima; antes de 2025, tampoco por encima: no se cotiza.
         assert_eq!(asalariado(50000.0, false, "", 2025).trabajador.len(), 4);
-        assert_eq!(asalariado(50000.0, false, "", 2024).anio_ss, 2025);
+        let s = asalariado(120000.0, false, "madrid", 2024);
+        assert!(s.tope && s.anio_ss == 2024 && s.trabajador.len() == 4 && s.empresa.len() == 6, "{s:?}");
+        assert_eq!(s.trabajador[0].importe, r2(4720.50 * 12.0 * 0.047));
     }
 
     /// 100.000 € y 30.000 € en Andalucía, indefinido, con las cifras de la Orden PJC/297/2026 (cotización de 2026),
@@ -353,26 +393,43 @@ mod tests {
         // Con 30.000 €, Madrid es de las que menos IRPF cobran: más que en Cataluña te queda.
         let cat = v.iter().find(|c| c.clave == "cataluna").unwrap();
         assert!(m.neto > cat.neto, "{} {}", m.neto, cat.neto);
-        let a = autonomo_por_comunidad(40000.0, 5000.0, 2025);
+        let a = autonomo_por_comunidad(40000.0, 5000.0, Cotiza::default(), 2025);
         assert_eq!(a.len(), 15);
         assert!(a.windows(2).all(|w| w[0].neto >= w[1].neto));
+    }
+
+    /// Se puede cotizar por más que la mínima: con la base que se elija, entre la mínima y la máxima del tramo (por
+    /// debajo de la mínima, la mínima; por encima de la máxima, la máxima). Más cuota, menos IRPF.
+    #[test]
+    fn una_cuota_mas_alta() {
+        let con = |base: Option<f64>| autonomo(40000.0, 5000.0, Cotiza { base, tarifa_plana: false }, "madrid", 2026);
+        let min = con(None);
+        assert_eq!((min.base, min.cuota_mes), (min.base_minima, min.cuota_minima));
+        let a = con(Some(1928.10));
+        assert_eq!((a.base, a.cuota_mes), (1928.10, r2(1928.10 * 0.315)));
+        assert_eq!(a.cuota_minima, min.cuota_minima);
+        assert_eq!(a.ss, r2(a.cuota_mes * 12.0));
+        assert!(a.irpf.total < min.irpf.total, "más cuota, menos IRPF");
+        assert_eq!(con(Some(10.0)).cuota_mes, min.cuota_mes);
+        let mucha = con(Some(1e6));
+        assert_eq!(mucha.base, mucha.base_maxima);
     }
 
     #[test]
     fn un_autonomo() {
         // 40.000 € facturados y 5.000 € de gastos: 35.000 × 0,93 / 12 = 2.712,50 € al mes → tramo 10 (2.330–2.760).
-        let a = autonomo(40000.0, 5000.0, "madrid", 2026);
+        let a = autonomo(40000.0, 5000.0, Cotiza::default(), "madrid", 2026);
         assert_eq!((a.tramo, a.base), (10, 1356.21));
         assert_eq!(a.ss, r2(r2(1356.21 * 0.315) * 12.0));
         // La cuota por conceptos suma lo mismo (salvo céntimos).
         assert!((suma(&a.cuota) - a.ss).abs() < 0.2, "{} {}", suma(&a.cuota), a.ss);
         assert_eq!(a.rendimiento, r2(35000.0 - a.ss));
         assert_eq!(a.gdj, r2(a.rendimiento * 0.05), "el 5 % (hasta 2.000 €)");
-        assert_eq!(autonomo(80000.0, 0.0, "", 2026).gdj, 2000.0, "hasta 2.000 €");
+        assert_eq!(autonomo(80000.0, 0.0, Cotiza::default(), "", 2026).gdj, 2000.0, "hasta 2.000 €");
         assert_eq!(a.reduccion, 0.0, "con más de 12.000 € no hay reducción");
         assert_eq!(a.neto, r2(35000.0 - a.ss - a.irpf.total));
         // Con poco, la reducción de 1.620 €.
-        let p = autonomo(9000.0, 0.0, "madrid", 2026);
+        let p = autonomo(9000.0, 0.0, Cotiza::default(), "madrid", 2026);
         assert_eq!(p.tramo, 2, "9.000 × 0,93 / 12 = 697,50 € al mes: tabla reducida");
         assert!(p.reduccion > 0.0 && p.irpf.total < 200.0, "{p:?}");
     }
